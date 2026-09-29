@@ -67,14 +67,6 @@
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       Drift Detection <span class="badge-count" id="driftNavBadge" style="display:none;">0</span>
     </button>
-    <button class="nav-tab-btn" data-tab="tab-ask">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-      Ask AI Assistant
-    </button>
-    <button class="nav-tab-btn" data-tab="tab-builder">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-      Function Builder
-    </button>
     <button class="nav-tab-btn" data-tab="tab-settings">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       Settings &amp; Demo Hub
@@ -119,7 +111,8 @@
           <div class="stat-icon">⚡</div>
           <div class="stat-info">
             <div class="stat-val" id="statWorkflowsCount">5</div>
-            <div class="stat-title">Active Workflows</div>
+            <div class="stat-title">Total Workflows</div>
+            <div class="stat-sub" id="statWorkflowsSub" style="font-size:11px; color:var(--text-muted); margin-top:2px;">Scope: v8 ALL / READ</div>
           </div>
         </div>
         <div class="stat-box">
@@ -138,11 +131,11 @@
         </div>
       </div>
 
-      <!-- Module Inventory Browser -->
+      <!-- Scanned Module Inventory Browser -->
       <div class="card-title-group mb-2">
         <h3 style="font-size:14px; font-weight:700;">Scanned Components &amp; Cryptographic Hashes</h3>
       </div>
-      <div class="metadata-table-wrapper">
+      <div class="metadata-table-wrapper mb-4">
         <table class="data-table" id="inventoryTable">
           <thead>
             <tr>
@@ -159,6 +152,75 @@
             <!-- Populated via JS -->
           </tbody>
         </table>
+      </div>
+
+      <!-- WORKFLOW AUTOMATION RULES & AI SELECTOR SECTION -->
+      <div class="workflow-explorer-card" style="margin-top:20px; border:1px solid var(--border-color); border-radius:10px; padding:18px; background:#ffffff;">
+        <div class="card-header-bar" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border-color);">
+          <div class="card-title-group">
+            <h3 style="font-size:15px; font-weight:700; display:flex; align-items:center; gap:8px;">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              CRM Workflow Rules (API v8) &amp; AI Documentation Selector
+            </h3>
+            <p style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">
+              Retrieved via <code>GET /crm/v8/settings/automation/workflow_rules</code> using OAuth Scope: <code>ZohoCRM.settings.workflow_rules.ALL</code> / <code>ZohoCRM.settings.workflow_rules.READ</code>. Select workflows to view API specs or generate AI documentation.
+            </p>
+          </div>
+          <div class="d-flex align-center gap-2">
+            <span class="badge badge-purple" id="workflowTotalCountBadge">0 Workflows Loaded</span>
+            <span class="badge badge-blue" id="workflowSelectedCountBadge">0 Selected</span>
+          </div>
+        </div>
+
+        <!-- Filter & Action Controls -->
+        <div class="d-flex justify-between align-center gap-3 mb-3 flex-wrap">
+          <div class="d-flex align-center gap-2 flex-wrap">
+            <input type="text" class="form-control" id="searchWorkflowInput" placeholder="🔍 Search workflows (name, criteria, actions)..." style="width:220px; padding:6px 10px; font-size:13px;" />
+            <select class="form-control" id="filterWorkflowModule" style="width:140px; padding:6px 10px; font-size:13px;">
+              <option value="ALL">All Modules</option>
+              <option value="Leads">Leads</option>
+              <option value="Deals">Deals</option>
+              <option value="Accounts">Accounts</option>
+              <option value="Contacts">Contacts</option>
+            </select>
+            <select class="form-control" id="filterWorkflowStatus" style="width:130px; padding:6px 10px; font-size:13px;">
+              <option value="ALL">All Status</option>
+              <option value="active">Active Only</option>
+              <option value="inactive">Inactive Only</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" id="btnRefreshWorkflows" title="Reload workflows directly via Zoho API v8">🔄 Refresh</button>
+            <button class="btn btn-secondary btn-sm" id="btnSelectAllWorkflows">Select All</button>
+            <button class="btn btn-secondary btn-sm" id="btnDeselectAllWorkflows">Clear</button>
+          </div>
+          <div>
+            <button class="btn btn-primary btn-sm" id="btnDocSelectedWorkflows" disabled style="background:var(--accent-gradient); border:none; padding:8px 16px; font-weight:700;">
+              ✨ Generate AI Documentation for Selected (<span id="btnDocSelectedCount">0</span>) &rarr;
+            </button>
+          </div>
+        </div>
+
+        <!-- Workflow Rules Table -->
+        <div class="metadata-table-wrapper" style="max-height:320px; overflow-y:auto;">
+          <table class="data-table" id="workflowTable">
+            <thead>
+              <tr>
+                <th style="width:40px; text-align:center;">
+                  <input type="checkbox" id="chkWorkflowHeaderAll" />
+                </th>
+                <th>Workflow Name</th>
+                <th>Module</th>
+                <th>Trigger Event</th>
+                <th>Criteria</th>
+                <th>Configured Actions</th>
+                <th>Status</th>
+                <th style="text-align:right; width:160px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="workflowTableBody">
+              <!-- Dynamically populated via JS -->
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div class="d-flex justify-between align-center mt-4">
@@ -180,8 +242,9 @@
           <p>AI-generated Markdown specs, automation flowcharts, and WorkDrive export.</p>
         </div>
         <div class="d-flex gap-2">
-          <select class="form-control" id="selectDocType" style="width:190px;">
+          <select class="form-control" id="selectDocType" style="width:220px;">
             <option value="technical">Full Technical Spec</option>
+            <option value="workflow_spec">⚡ Selected Workflows Spec</option>
             <option value="handover">Client Handover Pack</option>
             <option value="user_guide">End-User Guide</option>
             <option value="architecture">System Architecture</option>
@@ -296,123 +359,6 @@
             <div class="diff-body" id="diffNewContent">
               <!-- New Markdown snippet -->
             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 4: ASK AI ASSISTANT -->
-  <div class="tab-pane" id="tab-ask">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            Ask AI Assistant (Grounded System Q&amp;A)
-          </h2>
-          <p>Instant conversational answers grounded directly in your active CRM configuration, citing exact components.</p>
-        </div>
-        <span class="badge badge-blue">Grounded in Snapshot</span>
-      </div>
-
-      <!-- Chat Container -->
-      <div class="chat-container">
-        <div class="chat-history" id="chatMessages">
-          <div class="chat-bubble assistant">
-            <p><strong>👋 Welcome! I am your Zoho Living Documentation Assistant.</strong></p>
-            <p>I have scanned your active CRM configuration. Ask me any question about how your workflows, blueprints, custom fields, and Deluge functions work together.</p>
-          </div>
-        </div>
-
-        <!-- Prompt Suggestions -->
-        <div class="chat-prompt-suggestions">
-          <div class="prompt-chip" data-query="How does a lead become a deal?">💡 How does a lead become a deal?</div>
-          <div class="prompt-chip" data-query="Show all external API calls and integrations">🔌 Show all integrations &amp; functions</div>
-          <div class="prompt-chip" data-query="What blueprints and stage transitions are active?">🗺️ What blueprints are active?</div>
-          <div class="prompt-chip" data-query="List all mandatory fields across all modules">📋 Mandatory fields list</div>
-        </div>
-
-        <!-- Input Bar -->
-        <div class="chat-input-bar">
-          <input type="text" class="chat-input-field" id="chatInputField" placeholder="e.g. What happens when a lead stage changes to Qualified?" />
-          <button class="btn btn-primary" id="btnSendChat">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            Ask
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 5: FUNCTION BUILDER -->
-  <div class="tab-pane" id="tab-builder">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            AI Function Builder &amp; Deluge Studio
-          </h2>
-          <p>Describe an automation in plain English · Generates safe Deluge code, safety analysis, and auto-documents it.</p>
-        </div>
-      </div>
-
-      <div class="builder-grid">
-        <!-- Form Section -->
-        <div class="builder-form-pane">
-          <div class="form-group">
-            <label>Target CRM Module</label>
-            <select class="form-control" id="builderModule">
-              <option value="Deals">Deals</option>
-              <option value="Leads">Leads</option>
-              <option value="Accounts">Accounts</option>
-              <option value="Contacts">Contacts</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label>Trigger Event</label>
-            <select class="form-control" id="builderTrigger">
-              <option value="on_record_edit">On Record Edit (Workflow Rule)</option>
-              <option value="on_record_create">On Record Create</option>
-              <option value="webhook">Webhook / Inbound REST Trigger</option>
-              <option value="schedule">Scheduled Cron Job</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <label>Automation Requirement (Plain English)</label>
-            <textarea class="form-control" id="builderPrompt" placeholder="e.g. When a Deal reaches Closed Won, send customer details to Stripe billing webhook, verify response, and update the Last_Sync_Time on the Deal."></textarea>
-          </div>
-
-          <button class="btn btn-primary" id="btnGenerateFunction" style="width:100%;">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            Generate Deluge Function
-          </button>
-        </div>
-
-        <!-- Code & Safety Output -->
-        <div class="builder-output-pane">
-          <div class="code-output-container">
-            <div class="code-output-header">
-              <span id="builderFunctionTitle">generated_deluge_function.dg</span>
-              <div class="d-flex align-center gap-2">
-                <span class="safety-check-pill" id="builderSafetyBadge">🛡️ Safety Verified</span>
-                <button class="btn btn-secondary btn-sm" id="btnCopyDelugeCode">Copy Code</button>
-              </div>
-            </div>
-            <div class="code-output-body" id="builderCodeOutput">// Enter requirement on the left and click "Generate Deluge Function"...</div>
-          </div>
-
-          <div class="mt-4" id="builderAutoDocWrapper" style="display:none;">
-            <div class="card-title-group mb-2">
-              <h4 style="font-size:13.5px; font-weight:700;">Auto-Generated Documentation</h4>
-            </div>
-            <div class="doc-rendered-content" id="builderDocOutput" style="max-height:160px; padding:14px;"></div>
-            <button class="btn btn-success mt-2" id="btnDeployFunction">
-              🚀 Deploy to CRM &amp; Add to Living Docs
-            </button>
           </div>
         </div>
       </div>
@@ -614,12 +560,13 @@
               </div>
               <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Used to auto-provision custom modules via v8 API, read metadata, and store living documentation.</p>
               <ul class="scope-list">
+                <li>ZohoCRM.settings.workflow_rules.ALL</li>
+                <li>ZohoCRM.settings.workflow_rules.READ</li>
                 <li>ZohoCRM.modules.ALL</li>
-                <li>ZohoCRM.modules.All</li>
-                <li>ZohoCRM.org.READ</li>
+                <li>ZohoCRM.settings.fields.READ</li>
+                <li>ZohoCRM.settings.modules.READ</li>
                 <li>ZohoCRM.settings.ALL</li>
-                <li>ZohoCRM.settings.functions.ALL</li>
-                <li>ZohoCRM.settings.READ</li>
+                <li>ZohoCRM.org.READ</li>
               </ul>
             </div>
             <div class="scope-card">
@@ -750,6 +697,90 @@
     </div><!-- /.onboarding-body-card -->
   </div><!-- /.onboarding-page-container -->
 </div><!-- /#onboardingPageView -->
+
+  <!-- WORKFLOW DETAIL MODAL (Zoho CRM API v8 GET /settings/automation/workflow_rules/{id}) -->
+  <div id="workflowDetailModal" class="wf-modal-overlay" style="display:none;">
+    <div class="wf-modal-container">
+      <div class="wf-modal-header">
+        <div class="wf-modal-title-box">
+          <div class="d-flex align-center gap-2 flex-wrap">
+            <span class="badge badge-purple" style="font-family:monospace; font-size:11px;">GET /crm/v8/settings/automation/workflow_rules/{id}</span>
+            <span class="badge badge-green" style="font-size:11px;">Scope: ZohoCRM.settings.workflow_rules.ALL / READ</span>
+          </div>
+          <h3 id="modalWorkflowName" style="margin:6px 0 2px 0;">Workflow Rule</h3>
+          <p id="modalWorkflowId" style="font-size:11.5px; color:var(--text-muted); font-family:monospace; margin:0;"></p>
+        </div>
+        <button class="wf-modal-close" id="btnCloseWorkflowModal" title="Close">&times;</button>
+      </div>
+      
+      <div class="wf-modal-body">
+        <div class="wf-modal-tabs">
+          <button class="wf-modal-tab-btn active" data-modaltab="overview">Overview &amp; Triggers</button>
+          <button class="wf-modal-tab-btn" data-modaltab="conditions">Conditions &amp; Actions</button>
+          <button class="wf-modal-tab-btn" data-modaltab="json">Raw API v8 JSON</button>
+        </div>
+
+        <!-- Tab 1: Overview -->
+        <div class="wf-modal-content active" id="modalTabOverview">
+          <div class="wf-detail-grid">
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Associated Module</div>
+              <div class="wf-detail-val" id="modalWfModule">-</div>
+            </div>
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Workflow Status</div>
+              <div class="wf-detail-val" id="modalWfStatus">-</div>
+            </div>
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Trigger Event Type</div>
+              <div class="wf-detail-val" id="modalWfTrigger">-</div>
+            </div>
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Source System</div>
+              <div class="wf-detail-val" id="modalWfSource">-</div>
+            </div>
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Created Time &amp; By</div>
+              <div class="wf-detail-val" id="modalWfCreated">-</div>
+            </div>
+            <div class="wf-detail-card">
+              <div class="wf-detail-label">Modified Time &amp; By</div>
+              <div class="wf-detail-val" id="modalWfModified">-</div>
+            </div>
+          </div>
+          <div class="wf-detail-card" style="margin-bottom:12px;">
+            <div class="wf-detail-label">Rule Description</div>
+            <div style="font-size:12.5px; color:var(--text-main); margin-top:2px;" id="modalWfDesc">-</div>
+          </div>
+          <div class="wf-detail-card">
+            <div class="wf-detail-label">Execution Criteria</div>
+            <div style="font-size:12.5px; font-family:monospace; background:#ffffff; border:1px solid var(--border-color); padding:8px 10px; border-radius:6px; margin-top:4px;" id="modalWfCriteria">-</div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Conditions & Actions -->
+        <div class="wf-modal-content" id="modalTabConditions">
+          <div id="modalConditionsContainer"></div>
+        </div>
+
+        <!-- Tab 3: Raw JSON -->
+        <div class="wf-modal-content" id="modalTabJson">
+          <div class="d-flex justify-between align-center mb-2">
+            <span style="font-size:12px; color:var(--text-muted);">Exact response from <code>GET /crm/v8/settings/automation/workflow_rules/{id}</code> via <code>ZohoCRM.settings.workflow_rules.ALL</code> / <code>READ</code></span>
+            <button class="btn btn-secondary btn-sm" id="btnCopyModalJson">📋 Copy JSON</button>
+          </div>
+          <pre class="wf-modal-code" id="modalRawJson"></pre>
+        </div>
+      </div>
+
+      <div class="wf-modal-footer">
+        <button class="btn btn-secondary btn-sm" id="btnFooterCloseWorkflowModal">Close</button>
+        <button class="btn btn-primary btn-sm" id="btnModalDocWorkflow" style="background:var(--accent-gradient); border:none; font-weight:700;">
+          ✨ Generate AI Documentation for this Rule &rarr;
+        </button>
+      </div>
+    </div>
+  </div>
 
 <!-- Zoho Embedded SDK -->
 

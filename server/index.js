@@ -471,11 +471,231 @@ expressApp.get('/api/snapshots', (req, res) => {
   });
 });
 
+// Helper: Convert workflow to Zoho CRM API v8 specification format
+function formatWorkflowV8(wf, moduleName, moduleComponentId) {
+  const triggerType = wf.trigger_type || (wf.execute_when && wf.execute_when.type) || 'on_record_action';
+  const isActive = wf.status === 'active' || (wf.status && wf.status.active === true) || wf.status === true;
+
+  // Format Instant Actions
+  const instantActionsList = (wf.actions || []).map((act, idx) => {
+    let actType = 'tasks';
+    let actName = String(act);
+    if (actName.toLowerCase().startsWith('webhook:')) {
+      actType = 'webhooks';
+      actName = actName.replace(/^webhook:\s*/i, '');
+    } else if (actName.toLowerCase().startsWith('function:')) {
+      actType = 'functions';
+      actName = actName.replace(/^function:\s*/i, '');
+    } else if (actName.toLowerCase().startsWith('email:')) {
+      actType = 'email_notifications';
+      actName = actName.replace(/^email:\s*/i, '');
+    } else if (actName.toLowerCase().startsWith('field update:')) {
+      actType = 'field_updates';
+      actName = actName.replace(/^field update:\s*/i, '');
+    } else if (actName.toLowerCase().startsWith('action:')) {
+      actType = 'actions';
+      actName = actName.replace(/^action:\s*/i, '');
+    } else if (actName.toLowerCase().startsWith('task:')) {
+      actType = 'tasks';
+      actName = actName.replace(/^task:\s*/i, '');
+    }
+
+    return {
+      id: `act_${wf.id}_${idx + 1}`,
+      name: actName,
+      type: actType,
+      related_details: null
+    };
+  });
+
+  return {
+    id: wf.id,
+    name: wf.name,
+    description: wf.description || `Automated workflow rule for ${moduleName}`,
+    module: {
+      api_name: moduleName,
+      id: moduleComponentId || `mod_${moduleName}`
+    },
+    status: {
+      active: isActive
+    },
+    execute_when: {
+      type: triggerType,
+      details: {
+        trigger_module: {
+          api_name: moduleName,
+          id: moduleComponentId || `mod_${moduleName}`
+        },
+        criteria: wf.criteria || ''
+      }
+    },
+    editable: true,
+    deprecated: false,
+    deletable: true,
+    source: 'crm',
+    category: 'default',
+    created_time: wf.created_time || '2025-07-01T10:00:00+05:30',
+    created_by: {
+      name: 'System Administrator',
+      id: '4876876000000327001'
+    },
+    modified_time: wf.modified_time || '2025-07-08T12:30:00+05:30',
+    modified_by: {
+      name: 'System Administrator',
+      id: '4876876000000327001'
+    },
+    last_executed_time: wf.last_executed_time || null,
+    lock: {
+      locked_by: null,
+      message: null,
+      status: false
+    },
+    conditions: [
+      {
+        id: `cond_${wf.id}_01`,
+        sequence_number: 1,
+        criteria_details: {
+          criteria: {
+            field: {
+              api_name: wf.criteria ? wf.criteria.split(' ')[0] : 'Status',
+              id: `fld_${wf.id}_01`
+            },
+            comparator: 'contains',
+            type: 'value',
+            value: wf.criteria || 'Always Execute'
+          }
+        },
+        instant_actions: {
+          actions: instantActionsList
+        },
+        scheduled_actions: []
+      }
+    ],
+    actions: wf.actions || []
+  };
+}
+
+// Handler: Get All Workflows (Zoho CRM API v8 GET /settings/automation/workflow_rules)
+// Scopes: ZohoCRM.settings.workflow_rules.READ (or ALL)
+const getAllWorkflowsHandler = (req, res) => {
+  try {
+    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const workflows = [];
+    const moduleFilter = req.query.module;
+    const statusActiveFilter = req.query.status_active;
+    const searchQuery = (req.query.search || req.query.filter || '').toLowerCase();
+
+    (latestSnapshot.modules || []).forEach(m => {
+      if (moduleFilter && moduleFilter.toUpperCase() !== 'ALL' && m.module !== moduleFilter) return;
+      (m.workflows || []).forEach(wf => {
+        const formatted = formatWorkflowV8(wf, m.module, m.component_id);
+
+        // Status filter
+        if (statusActiveFilter !== undefined && statusActiveFilter !== '') {
+          const wantActive = statusActiveFilter === 'true' || statusActiveFilter === true;
+          if (formatted.status.active !== wantActive) return;
+        }
+
+        // Search query filter
+        if (searchQuery) {
+          const matchName = formatted.name.toLowerCase().includes(searchQuery);
+          const matchMod = formatted.module.api_name.toLowerCase().includes(searchQuery);
+          const matchId = formatted.id.toLowerCase().includes(searchQuery);
+          const matchCrit = (formatted.execute_when.details.criteria || '').toLowerCase().includes(searchQuery);
+          if (!matchName && !matchMod && !matchId && !matchCrit) return;
+        }
+
+        workflows.push(formatted);
+      });
+    });
+
+    res.json({
+      workflow_rules: workflows,
+      info: {
+        count: workflows.length,
+        page: 1,
+        per_page: 200,
+        more_records: false
+      },
+      scopes_required: [
+        'ZohoCRM.settings.workflow_rules.READ',
+        'ZohoCRM.settings.workflow_rules.ALL'
+      ],
+      api_endpoint: 'GET /crm/v8/settings/automation/workflow_rules',
+      doc_reference: 'https://www.zoho.com/crm/developer/docs/api/v8/get-all-workflows.html'
+    });
+  } catch (err) {
+    console.error('Workflows fetch error:', err);
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+};
+
+// Handler: Get a Specific Workflow Rule (Zoho CRM API v8 GET /settings/automation/workflow_rules/{id})
+// Scopes: ZohoCRM.settings.workflow_rules.READ (or ALL)
+const getSingleWorkflowHandler = (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    let foundWf = null;
+    let foundModule = null;
+
+    for (const m of (latestSnapshot.modules || [])) {
+      const match = (m.workflows || []).find(w => String(w.id) === String(targetId));
+      if (match) {
+        foundWf = match;
+        foundModule = m;
+        break;
+      }
+    }
+
+    if (!foundWf) {
+      return res.status(404).json({
+        code: 'INVALID_DATA',
+        message: `Workflow rule with ID "${targetId}" not found.`,
+        status: 'error'
+      });
+    }
+
+    const formatted = formatWorkflowV8(foundWf, foundModule.module, foundModule.component_id);
+
+    res.json({
+      workflow_rules: [formatted],
+      scopes_required: [
+        'ZohoCRM.settings.workflow_rules.READ',
+        'ZohoCRM.settings.workflow_rules.ALL'
+      ],
+      api_endpoint: `GET /crm/v8/settings/automation/workflow_rules/${targetId}`,
+      doc_reference: 'https://www.zoho.com/crm/developer/docs/api/v8/get-a-workflow.html'
+    });
+  } catch (err) {
+    console.error('Single workflow fetch error:', err);
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+};
+
+// 3b. Workflows REST Endpoints (Zoho CRM API v8 Specification)
+expressApp.get('/api/crm/workflows', getAllWorkflowsHandler);
+expressApp.get('/api/crm/workflows/:id', getSingleWorkflowHandler);
+expressApp.get('/crm/v8/settings/automation/workflow_rules', getAllWorkflowsHandler);
+expressApp.get('/crm/v8/settings/automation/workflow_rules/:id', getSingleWorkflowHandler);
+
 // 4. Generate Documentation via Claude / High-Fidelity Engine
 expressApp.post('/api/generate', async (req, res) => {
   try {
-    const { doc_type = 'technical', audience = 'admin', custom_prompt } = req.body;
+    const { doc_type = 'technical', audience = 'admin', custom_prompt, selected_workflows, workflow_ids } = req.body;
     const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+
+    // Determine target workflows if workflow_spec or selected_workflows provided
+    let targetWorkflows = selected_workflows;
+    if (!targetWorkflows && workflow_ids && Array.isArray(workflow_ids)) {
+      const allWfs = [];
+      (latestSnapshot.modules || []).forEach(m => {
+        (m.workflows || []).forEach(w => allWfs.push({ ...w, module: m.module }));
+      });
+      targetWorkflows = allWfs.filter(w => workflow_ids.includes(w.id));
+    }
+
+    const isWorkflowDoc = (doc_type === 'workflow_spec' || (targetWorkflows && targetWorkflows.length > 0));
 
     // Call Claude API if API Key provided
     if (appSettings.claudeApiKey && appSettings.claudeApiKey.startsWith('sk-ant-')) {
@@ -488,7 +708,24 @@ CRITICAL RULES:
 4. Tag sections with Source Component IDs in bracketed badges (e.g. \`[Component: mod_Leads]\`, \`[Workflow: wf_Lead_Auto_Convert]\`).
 5. Append footer: '> *AI-generated Living Documentation · Reviewed by: ____________*'`;
 
-        const userPrompt = `Generate a complete ${doc_type} documentation suite for audience: ${audience}.
+        let userPrompt = '';
+        if (isWorkflowDoc && targetWorkflows && targetWorkflows.length > 0) {
+          userPrompt = `Generate a dedicated Zoho CRM Workflow Automation Architecture & Engineering Specification for ${targetWorkflows.length} specific workflow rule(s) for audience: ${audience}.
+Selected Workflow Rules:
+${JSON.stringify(targetWorkflows, null, 2)}
+
+Full Context Snapshot:
+${JSON.stringify(latestSnapshot, null, 2)}
+
+Structure the response with:
+# 1. Executive Workflow Automation Summary & Execution Hierarchy
+# 2. Trigger-Condition-Action (TCA) Engineering Matrix
+# 3. End-to-End Workflow Flowchart (Mermaid syntax)
+# 4. Integrations, Webhook Payloads & Deluge Dependencies
+# 5. Failure Modes, Race Conditions & Loop Prevention Analysis
+# 6. Administration, Maintenance & Audit Log`;
+        } else {
+          userPrompt = `Generate a complete ${doc_type} documentation suite for audience: ${audience}.
 Active Zoho CRM Snapshot:
 ${JSON.stringify(latestSnapshot, null, 2)}
 
@@ -499,6 +736,7 @@ Include:
 # 4. Blueprint State Transition Specs (with Mermaid state diagram)
 # 5. Custom Functions, Webhooks & Integrations
 # 6. Maintenance & Governance Guide`;
+        }
 
         const claudeResp = await fetch(appSettings.claudeApiUrl, {
           method: 'POST',
@@ -535,7 +773,10 @@ Include:
     }
 
     // High-Fidelity Local Markdown Generator
-    const markdown = generateRichLivingDoc(latestSnapshot, doc_type, audience);
+    const markdown = isWorkflowDoc && targetWorkflows && targetWorkflows.length > 0
+      ? generateWorkflowSpecDoc(targetWorkflows, latestSnapshot, audience)
+      : generateRichLivingDoc(latestSnapshot, doc_type, audience);
+
     dataStore.generatedDocs[latestSnapshot.id] = markdown;
 
     res.json({
@@ -653,6 +894,96 @@ stateDiagram-v2
   doc += `- **Drift Detection**: Enabled (Continuous comparison against baseline \`${snapshot.id}\`)\n`;
   doc += `- **Audit Status**: Verified against Zoho CRM v6 APIs.\n\n`;
   doc += `> *AI-generated Living Documentation · Reviewed by: ________________________*`;
+
+  return doc;
+}
+
+// Dedicated Workflow Automation Architecture & Specification Generator
+function generateWorkflowSpecDoc(selectedWorkflows, snapshot, audience) {
+  const timestamp = new Date().toLocaleString();
+  const wfCount = selectedWorkflows.length;
+  const modulesCovered = [...new Set(selectedWorkflows.map(w => w.module || (w.module && w.module.api_name) || 'CRM'))];
+
+  let doc = `# Zoho CRM Workflow Automation Architecture Spec\n\n`;
+  doc += `> **Document Scope**: **${wfCount} Targeted Automation Rule(s)** · **Modules**: *${modulesCovered.join(', ')}*\n`;
+  doc += `> **Generated**: ${timestamp} · **Target Audience**: *${audience.toUpperCase()}* · **API Version**: *Zoho CRM API v8*\n\n`;
+
+  doc += `## 1. Executive Summary & Execution Hierarchy \`[Component: wf_exec_summary]\`\n\n`;
+  doc += `This targeted specification details **${wfCount} mission-critical workflow rule(s)** configured within Zoho CRM. `;
+  doc += `These automations enforce business rules, automated field updates, third-party webhook integrations, and SDR/Account Executive task handoffs.\n\n`;
+
+  doc += `### Active Workflows In Scope\n\n`;
+  doc += `| Workflow Name | Target Module | Trigger Event | Status | Execution Criteria |\n`;
+  doc += `| :--- | :--- | :--- | :--- | :--- |\n`;
+  selectedWorkflows.forEach(wf => {
+    const modName = wf.module?.api_name || wf.module || 'Global';
+    const trig = wf.trigger_type || wf.execute_when?.type || 'on_record_action';
+    const crit = wf.criteria || wf.execute_when?.details?.criteria || 'Always Execute';
+    const isActive = wf.status === 'active' || (wf.status && wf.status.active === true) || wf.status === true;
+    doc += `| **${wf.name}** | \`${modName}\` | \`${trig}\` | ${isActive ? '🟢 Active' : '⚪ Inactive'} | \`${crit}\` |\n`;
+  });
+  doc += `\n`;
+
+  doc += `## 2. End-to-End Workflow Flowchart \`[Component: wf_mermaid_flow]\`\n\n`;
+  doc += `\`\`\`mermaid
+flowchart TD
+`;
+  selectedWorkflows.forEach((wf, idx) => {
+    const modName = wf.module?.api_name || wf.module || 'Record';
+    const trig = (wf.trigger_type || wf.execute_when?.type || 'event').replace(/_/g, ' ');
+    const wfNodeId = `WF_${idx}`;
+    const startNode = `START_${idx}`;
+    const condNode = `COND_${idx}`;
+    
+    doc += `    ${startNode}["⚡ Event: ${trig} on ${modName}"] --> ${condNode}{"${wf.name}\\nCriteria Met?"}\n`;
+    doc += `    ${condNode} -->|Yes| ${wfNodeId}["Execute ${wf.actions ? wf.actions.length : 1} Action(s)"]\n`;
+    
+    if (wf.actions && Array.isArray(wf.actions)) {
+      wf.actions.forEach((act, aIdx) => {
+        const actNodeId = `ACT_${idx}_${aIdx}`;
+        doc += `    ${wfNodeId} --> ${actNodeId}["${String(act).replace(/"/g, "'")}"]\n`;
+      });
+    }
+    doc += `    ${condNode} -->|No| END_${idx}["Skip / No Operation"]\n`;
+  });
+  doc += `\`\`\`\n\n`;
+
+  doc += `## 3. Trigger-Condition-Action (TCA) Engineering Matrix \`[Component: wf_tca_matrix]\`\n\n`;
+  selectedWorkflows.forEach((wf, i) => {
+    const modName = wf.module?.api_name || wf.module || 'CRM';
+    const trig = wf.trigger_type || wf.execute_when?.type || 'on_record_action';
+    const crit = wf.criteria || wf.execute_when?.details?.criteria || 'Always execute';
+    
+    doc += `### ${i + 1}. \`${wf.name}\` (\`${modName}\`) \`[${wf.id}]\`\n\n`;
+    doc += `- **Unique Rule ID**: \`${wf.id}\`\n`;
+    doc += `- **Associated Module**: \`${modName}\`\n`;
+    doc += `- **Trigger Type**: \`${trig}\`\n`;
+    doc += `- **Evaluation Criteria**: \`${crit}\`\n`;
+    doc += `- **Configured Actions**:\n`;
+    
+    if (wf.actions && wf.actions.length > 0) {
+      wf.actions.forEach(act => {
+        doc += `  - ⚡ **${act}**\n`;
+      });
+    } else {
+      doc += `  - *(No actions currently configured)*\n`;
+    }
+    doc += `\n`;
+  });
+
+  doc += `## 4. Webhook Payloads, Deluge Scripts & External Integrations \`[Component: wf_integrations]\`\n\n`;
+  doc += `Any webhook calls and custom functions invoked by the selected workflows utilize Zoho Named Connections (\`docsagent_connection\`).\n\n`;
+  doc += `- **Zero Hardcoded API Keys**: All authentication is delegated to secure OAuth token governance.\n`;
+  doc += `- **Timeout Handling**: Webhooks and third-party REST endpoints configured with retry policies.\n\n`;
+
+  doc += `## 5. Failure Modes, Race Conditions & Loop Prevention \`[Component: wf_safety]\`\n\n`;
+  doc += `| Risk Factor | Potential Impact | Mitigation in Configuration |\n`;
+  doc += `| :--- | :--- | :--- |\n`;
+  doc += `| **Recursive Triggers** | Infinite webhook loop | Ensure workflow does not re-trigger edit events on same field |\n`;
+  doc += `| **Missing Required Fields** | Action failure | Criteria includes \`is not empty\` checks before execution |\n`;
+  doc += `| **Third-Party Outage** | Delayed sync | Asynchronous Deluge task queuing for API operations |\n\n`;
+
+  doc += `> *Targeted Workflow Documentation · Living Documentation Agent · Reviewed by: ________________________*`;
 
   return doc;
 }

@@ -26,7 +26,9 @@
       workdriveFolder: 'folder_living_docs_crm',
       docsAgentConnection: 'docsagent_connection',
       workdriveConnection: 'workdrive_connection'
-    }
+    },
+    selectedWorkflowIds: new Set(),
+    allWorkflowsList: []
   };
 
   // DOM Elements Cache
@@ -62,6 +64,40 @@
     dom.inventoryTableBody = document.getElementById('inventoryTableBody');
     dom.scanTimestampBadge = document.getElementById('scanTimestampBadge');
     dom.btnProceedToDoc = document.getElementById('btnProceedToDoc');
+
+    // Workflow Rules Explorer & Selector
+    dom.workflowTableBody = document.getElementById('workflowTableBody');
+    dom.workflowTotalCountBadge = document.getElementById('workflowTotalCountBadge');
+    dom.workflowSelectedCountBadge = document.getElementById('workflowSelectedCountBadge');
+    dom.searchWorkflowInput = document.getElementById('searchWorkflowInput');
+    dom.filterWorkflowModule = document.getElementById('filterWorkflowModule');
+    dom.filterWorkflowStatus = document.getElementById('filterWorkflowStatus');
+    dom.btnRefreshWorkflows = document.getElementById('btnRefreshWorkflows');
+    dom.btnSelectAllWorkflows = document.getElementById('btnSelectAllWorkflows');
+    dom.btnDeselectAllWorkflows = document.getElementById('btnDeselectAllWorkflows');
+    dom.btnDocSelectedWorkflows = document.getElementById('btnDocSelectedWorkflows');
+    dom.btnDocSelectedCount = document.getElementById('btnDocSelectedCount');
+    dom.chkWorkflowHeaderAll = document.getElementById('chkWorkflowHeaderAll');
+    dom.statWorkflowsSub = document.getElementById('statWorkflowsSub');
+
+    // Workflow Detail Modal (API v8 get-a-workflow)
+    dom.workflowDetailModal = document.getElementById('workflowDetailModal');
+    dom.btnCloseWorkflowModal = document.getElementById('btnCloseWorkflowModal');
+    dom.btnFooterCloseWorkflowModal = document.getElementById('btnFooterCloseWorkflowModal');
+    dom.btnCopyModalJson = document.getElementById('btnCopyModalJson');
+    dom.btnModalDocWorkflow = document.getElementById('btnModalDocWorkflow');
+    dom.modalWorkflowName = document.getElementById('modalWorkflowName');
+    dom.modalWorkflowId = document.getElementById('modalWorkflowId');
+    dom.modalWfModule = document.getElementById('modalWfModule');
+    dom.modalWfStatus = document.getElementById('modalWfStatus');
+    dom.modalWfTrigger = document.getElementById('modalWfTrigger');
+    dom.modalWfSource = document.getElementById('modalWfSource');
+    dom.modalWfCreated = document.getElementById('modalWfCreated');
+    dom.modalWfModified = document.getElementById('modalWfModified');
+    dom.modalWfDesc = document.getElementById('modalWfDesc');
+    dom.modalWfCriteria = document.getElementById('modalWfCriteria');
+    dom.modalConditionsContainer = document.getElementById('modalConditionsContainer');
+    dom.modalRawJson = document.getElementById('modalRawJson');
 
     // Tab 2: Living Docs Studio
     dom.selectDocType = document.getElementById('selectDocType');
@@ -143,6 +179,82 @@
       }
     });
 
+    // Workflow Explorer & AI Documentation Selector
+    if (dom.searchWorkflowInput) {
+      dom.searchWorkflowInput.addEventListener('input', filterAndRenderWorkflows);
+    }
+    if (dom.filterWorkflowModule) {
+      dom.filterWorkflowModule.addEventListener('change', filterAndRenderWorkflows);
+    }
+    if (dom.filterWorkflowStatus) {
+      dom.filterWorkflowStatus.addEventListener('change', filterAndRenderWorkflows);
+    }
+    if (dom.btnRefreshWorkflows) {
+      dom.btnRefreshWorkflows.addEventListener('click', refreshWorkflowsOnly);
+    }
+    if (dom.btnSelectAllWorkflows) {
+      dom.btnSelectAllWorkflows.addEventListener('click', () => {
+        state.allWorkflowsList.forEach(w => state.selectedWorkflowIds.add(w.id));
+        updateWorkflowSelectionUI();
+      });
+    }
+    if (dom.btnDeselectAllWorkflows) {
+      dom.btnDeselectAllWorkflows.addEventListener('click', () => {
+        state.selectedWorkflowIds.clear();
+        updateWorkflowSelectionUI();
+      });
+    }
+    if (dom.chkWorkflowHeaderAll) {
+      dom.chkWorkflowHeaderAll.addEventListener('change', (e) => {
+        const isChecked = e.target.checked;
+        const visibleWfs = getVisibleWorkflows();
+        visibleWfs.forEach(w => {
+          if (isChecked) state.selectedWorkflowIds.add(w.id);
+          else state.selectedWorkflowIds.delete(w.id);
+        });
+        updateWorkflowSelectionUI();
+      });
+    }
+    if (dom.btnDocSelectedWorkflows) {
+      dom.btnDocSelectedWorkflows.addEventListener('click', () => {
+        documentSelectedWorkflows();
+      });
+    }
+
+    // Workflow Detail Modal Events
+    if (dom.btnCloseWorkflowModal) {
+      dom.btnCloseWorkflowModal.addEventListener('click', closeWorkflowModal);
+    }
+    if (dom.btnFooterCloseWorkflowModal) {
+      dom.btnFooterCloseWorkflowModal.addEventListener('click', closeWorkflowModal);
+    }
+    if (dom.btnCopyModalJson) {
+      dom.btnCopyModalJson.addEventListener('click', copyModalJson);
+    }
+    if (dom.btnModalDocWorkflow) {
+      dom.btnModalDocWorkflow.addEventListener('click', () => {
+        if (state.currentModalWorkflowId) {
+          const id = state.currentModalWorkflowId;
+          closeWorkflowModal();
+          state.selectedWorkflowIds.clear();
+          state.selectedWorkflowIds.add(id);
+          updateWorkflowSelectionUI();
+          documentSelectedWorkflows();
+        }
+      });
+    }
+    if (dom.workflowDetailModal) {
+      dom.workflowDetailModal.addEventListener('click', (e) => {
+        if (e.target === dom.workflowDetailModal) closeWorkflowModal();
+      });
+    }
+    document.querySelectorAll('.wf-modal-tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tabKey = btn.getAttribute('data-modaltab');
+        switchModalTab(tabKey);
+      });
+    });
+
     // Document Generator
     dom.btnGenerateDocs.addEventListener('click', generateDocs);
     dom.btnCopyMarkdown.addEventListener('click', copyMarkdownToClipboard);
@@ -155,22 +267,26 @@
     dom.btnTargetedRegenerate.addEventListener('click', targetedRegenerate);
 
     // Ask AI
-    dom.btnSendChat.addEventListener('click', sendChatMessage);
-    dom.chatInputField.addEventListener('keydown', e => {
-      if (e.key === 'Enter') sendChatMessage();
-    });
-    dom.promptChips.forEach(chip => {
-      chip.addEventListener('click', () => {
-        const query = chip.getAttribute('data-query');
-        dom.chatInputField.value = query;
-        sendChatMessage();
+    if (dom.btnSendChat) dom.btnSendChat.addEventListener('click', sendChatMessage);
+    if (dom.chatInputField) {
+      dom.chatInputField.addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendChatMessage();
       });
-    });
+    }
+    if (dom.promptChips) {
+      dom.promptChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+          const query = chip.getAttribute('data-query');
+          if (dom.chatInputField) dom.chatInputField.value = query;
+          sendChatMessage();
+        });
+      });
+    }
 
     // Function Builder
-    dom.btnGenerateFunction.addEventListener('click', generateFunction);
-    dom.btnCopyDelugeCode.addEventListener('click', copyDelugeCode);
-    dom.btnDeployFunction.addEventListener('click', deployFunction);
+    if (dom.btnGenerateFunction) dom.btnGenerateFunction.addEventListener('click', generateFunction);
+    if (dom.btnCopyDelugeCode) dom.btnCopyDelugeCode.addEventListener('click', copyDelugeCode);
+    if (dom.btnDeployFunction) dom.btnDeployFunction.addEventListener('click', deployFunction);
 
     // Settings & Connection Governance
     dom.btnSaveSettings.addEventListener('click', saveSettings);
@@ -952,13 +1068,463 @@
       dom.statFunctionsCount.textContent = snapshot.stats?.total_functions || snapshot.functions?.length || 0;
       dom.scanTimestampBadge.textContent = `Last Scanned: ${new Date(snapshot.timestamp || Date.now()).toLocaleTimeString()}`;
 
-      // Populate Inventory Table
+      // Populate Inventory Table & Workflows Table (initial/simulated data)
       renderInventoryTable(snapshot);
+      renderWorkflowsTable(snapshot);
+
+      // Then attempt to fetch REAL Zoho CRM Workflow Rules via Named Connection
+      await fetchAndMergeRealWorkflows(snapshot);
     } catch (err) {
       console.error('Scan failed:', err);
     } finally {
       dom.btnRunFullScan.disabled = false;
       dom.btnRunFullScan.innerHTML = '<span>Run Full Scan</span>';
+    }
+  }
+
+  // ==========================================
+  // FETCH REAL ZOHO CRM WORKFLOWS (API v8)
+  // Endpoint: GET /crm/v8/settings/automation/workflow_rules
+  // Required Scope: ZohoCRM.settings.workflow_rules.READ (or ALL)
+  // Reference: https://www.zoho.com/crm/developer/docs/api/v8/get-all-workflows.html
+  // ==========================================
+  async function fetchAndMergeRealWorkflows(snapshot) {
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+
+    if (dom.workflowTotalCountBadge) {
+      dom.workflowTotalCountBadge.textContent = '⏳ Fetching from Zoho CRM...';
+    }
+
+    // Strategy 1: Zoho Named Connection (when running inside CRM Widget)
+    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.CONNECTION && ZOHO.CRM.CONNECTION.invoke) {
+      try {
+        console.log('[Workflows] Fetching via Named Connection:', docsConn, 'using Scope: ZohoCRM.settings.workflow_rules.READ');
+        let allRules = [];
+        let page = 1;
+        let hasMore = true;
+
+        // Fetch all pages (up to 5 pages / 1000 rules)
+        while (hasMore && page <= 5) {
+          const wfResp = await withTimeout(
+            invokeZohoConnectionAPI(docsConn, {
+              endpoint: '/crm/v8/settings/automation/workflow_rules',
+              method: 'GET',
+              queryParams: { page: page, per_page: 200 }
+            }),
+            8000,
+            null
+          );
+
+          const rules = (wfResp && (wfResp.workflow_rules || wfResp.data || wfResp.workflows)) || [];
+          if (Array.isArray(rules) && rules.length > 0) {
+            allRules = allRules.concat(rules);
+          }
+          hasMore = (wfResp?.info?.more_records === true && rules.length === 200);
+          page++;
+        }
+
+        if (allRules.length > 0) {
+          console.log('[Workflows] Got ' + allRules.length + ' real workflow rules from Zoho CRM API v8');
+          const normalized = normalizeZohoWorkflows(allRules);
+          injectWorkflowsIntoSnapshot(snapshot, normalized);
+          renderWorkflowsTable(snapshot);
+          updateWorkflowCountStats(snapshot);
+          showScopesInfoBadge('live');
+          return;
+        } else {
+          console.warn('[Workflows] Named Connection returned empty workflow list — check scopes');
+          showScopesInfoBadge('scope_error');
+        }
+      } catch (connErr) {
+        console.warn('[Workflows] Named Connection fetch failed:', connErr.message);
+        showScopesInfoBadge('scope_error');
+      }
+    }
+
+    // Strategy 2: Server-side proxy (standalone / dev mode)
+    try {
+      console.log('[Workflows] Fetching via server proxy /api/crm/workflows');
+      const wfData = await fetch('/api/crm/workflows').then(function(r) { return r.json(); });
+      const rules = wfData.workflow_rules || [];
+      if (rules.length > 0) {
+        console.log('[Workflows] Server proxy returned ' + rules.length + ' workflow rules');
+        const normalized = normalizeZohoWorkflows(rules);
+        injectWorkflowsIntoSnapshot(snapshot, normalized);
+        renderWorkflowsTable(snapshot);
+        updateWorkflowCountStats(snapshot);
+        showScopesInfoBadge('simulated');
+        return;
+      }
+    } catch (serverErr) {
+      console.warn('[Workflows] Server proxy failed:', serverErr.message);
+    }
+
+    // Fallback: use simulated data already rendered from /api/scan
+    console.log('[Workflows] Using simulated data from scan snapshot');
+    updateWorkflowCountStats(snapshot);
+    showScopesInfoBadge('simulated');
+  }
+
+  // Normalize Zoho CRM API v8 workflow_rules → internal format with conditions & actions
+  function normalizeZohoWorkflows(apiWorkflows) {
+    return apiWorkflows.map(function(wf) {
+      // Extract criteria from conditions or details
+      let crit = (wf.execute_when && wf.execute_when.details && wf.execute_when.details.criteria) ||
+                 (wf.condition && wf.condition.criteria) ||
+                 wf.criteria || null;
+      if (!crit && wf.conditions && wf.conditions.length > 0) {
+        const c0 = wf.conditions[0];
+        if (c0.criteria_details?.criteria) {
+          const cObj = c0.criteria_details.criteria;
+          crit = `${cObj.field?.api_name || 'Field'} ${cObj.comparator || 'equals'} ${cObj.value || ''}`;
+        }
+      }
+
+      // Extract actions from wf.actions OR wf.conditions
+      let actionList = wf.actions || wf.workflow_actions || [];
+      if ((!actionList || actionList.length === 0) && wf.conditions && wf.conditions.length > 0) {
+        const extracted = [];
+        wf.conditions.forEach(c => {
+          (c.instant_actions?.actions || []).forEach(a => {
+            extracted.push(a.name ? `${a.type || 'Action'}: ${a.name}` : a);
+          });
+          (c.scheduled_actions || []).forEach(sa => {
+            (sa.actions || []).forEach(a => {
+              extracted.push(a.name ? `[Scheduled] ${a.type || 'Action'}: ${a.name}` : a);
+            });
+          });
+        });
+        if (extracted.length > 0) actionList = extracted;
+      }
+
+      return {
+        id: String(wf.id || wf.workflow_rule_id || ('wf_live_' + Date.now() + '_' + Math.random().toString(36).slice(2))),
+        name: wf.name || wf.rule_name || 'Unnamed Workflow',
+        status: (wf.active === true || (wf.status && wf.status.active === true) || wf.status === 'Active' || wf.status === 'active') ? 'active' : 'inactive',
+        trigger_type: normalizeTriggerType((wf.execute_when && wf.execute_when.type) || wf.rule_trigger_category || wf.trigger || 'on_record_action'),
+        criteria: crit,
+        actions: extractActionLabels(actionList),
+        module: (wf.module && (wf.module.api_name || wf.module)) || wf.module || 'Unknown',
+        module_id: (wf.module && wf.module.id) || null,
+        created_time: wf.created_time || null,
+        created_by: wf.created_by || null,
+        modified_time: wf.modified_time || null,
+        modified_by: wf.modified_by || null,
+        description: wf.description || '',
+        conditions: wf.conditions || [],
+        source: wf.source || 'crm',
+        _raw: wf,
+        _source: 'zoho_api_v8'
+      };
+    });
+  }
+
+  function normalizeTriggerType(raw) {
+    var map = {
+      'On Record Create': 'on_record_create',
+      'On Record Edit': 'on_record_edit',
+      'Create or Edit': 'create_or_edit',
+      'On Record Delete': 'on_record_delete',
+      'Field Update': 'field_update',
+      'Incoming Call CreateEdit': 'incoming_call_createedit',
+      'Email Received': 'email_received',
+      'Overdue': 'overdue',
+      'Scheduled': 'scheduled'
+    };
+    return map[raw] || (raw || 'on_record_action').toLowerCase().replace(/\s+/g, '_');
+  }
+
+  function extractActionLabels(actions) {
+    if (!Array.isArray(actions)) return [];
+    return actions.map(function(act) {
+      if (typeof act === 'string') return act;
+      var type = act.type || act.action_type || 'Action';
+      var name = act.name || act.action_name || '';
+      return name ? (type + ': ' + name) : type;
+    });
+  }
+
+  // Inject normalized workflows back into the snapshot modules array by module name
+  function injectWorkflowsIntoSnapshot(snapshot, normalizedWorkflows) {
+    if (!snapshot.modules) snapshot.modules = [];
+
+    var byModule = {};
+    normalizedWorkflows.forEach(function(wf) {
+      var mod = wf.module || 'Unknown';
+      if (!byModule[mod]) byModule[mod] = [];
+      byModule[mod].push(wf);
+    });
+
+    Object.keys(byModule).forEach(function(modName) {
+      var wfs = byModule[modName];
+      var modEntry = snapshot.modules.find(function(m) { return m.module === modName; });
+      if (!modEntry) {
+        modEntry = { module: modName, component_id: 'mod_' + modName, fields: [], workflows: [], blueprints: [] };
+        snapshot.modules.push(modEntry);
+      }
+      modEntry.workflows = wfs;
+    });
+
+    state.allWorkflowsList = normalizedWorkflows;
+  }
+
+  function updateWorkflowCountStats(snapshot) {
+    var total = 0;
+    var activeCount = 0;
+    var list = state.allWorkflowsList || [];
+
+    if (list.length > 0) {
+      total = list.length;
+      activeCount = list.filter(w => w.status === 'active' || (w.status && w.status.active === true) || w.status === true).length;
+    } else {
+      (snapshot.modules || []).forEach(function(m) {
+        (m.workflows || []).forEach(function(w) {
+          total++;
+          if (w.status === 'active' || (w.status && w.status.active === true) || w.status === true) {
+            activeCount++;
+          }
+        });
+      });
+    }
+
+    // Update KPI Card Total Workflows
+    if (dom.statWorkflowsCount) dom.statWorkflowsCount.textContent = total;
+    if (dom.statWorkflowsSub) {
+      dom.statWorkflowsSub.textContent = `${activeCount} active · Scope: v8 READ`;
+    }
+
+    // Update Explorer Badge
+    if (dom.workflowTotalCountBadge) dom.workflowTotalCountBadge.textContent = `${total} Workflows Loaded`;
+    if (snapshot.stats) snapshot.stats.total_workflows = total;
+
+    // Dynamically populate module dropdown filter
+    populateModuleFilterOptions();
+  }
+
+  function populateModuleFilterOptions() {
+    if (!dom.filterWorkflowModule) return;
+    const currentVal = dom.filterWorkflowModule.value || 'ALL';
+    const modulesSet = new Set();
+    state.allWorkflowsList.forEach(w => {
+      if (w.module) modulesSet.add(w.module);
+    });
+
+    let opts = '<option value="ALL">All Modules</option>';
+    modulesSet.forEach(mod => {
+      const isSel = (mod === currentVal) ? 'selected' : '';
+      opts += `<option value="${escapeHtml(mod)}" ${isSel}>${escapeHtml(mod)}</option>`;
+    });
+    dom.filterWorkflowModule.innerHTML = opts;
+  }
+
+  async function refreshWorkflowsOnly() {
+    if (dom.btnRefreshWorkflows) {
+      dom.btnRefreshWorkflows.disabled = true;
+      dom.btnRefreshWorkflows.innerHTML = '⏳ Refreshing...';
+    }
+
+    try {
+      const snap = state.activeSnapshot || { modules: [] };
+      await fetchAndMergeRealWorkflows(snap);
+    } catch (e) {
+      console.error('Refresh workflows error:', e);
+    } finally {
+      if (dom.btnRefreshWorkflows) {
+        dom.btnRefreshWorkflows.disabled = false;
+        dom.btnRefreshWorkflows.innerHTML = '🔄 Refresh';
+      }
+    }
+  }
+
+  // Show scope/source info badge in the workflow section header
+  function showScopesInfoBadge(mode) {
+    var scopeBadge = document.getElementById('wfScopeInfoBadge');
+    if (!scopeBadge) {
+      var headerArea = document.querySelector('.workflow-explorer-card .card-header-bar');
+      if (headerArea) {
+        scopeBadge = document.createElement('div');
+        scopeBadge.id = 'wfScopeInfoBadge';
+        scopeBadge.style.cssText = 'font-size:11.5px; margin-top:10px; padding:7px 12px; border-radius:8px; display:flex; align-items:center; gap:6px; width:100%; box-sizing:border-box;';
+        headerArea.appendChild(scopeBadge);
+      }
+    }
+    if (!scopeBadge) return;
+
+    var conn = escapeHtml(state.settings.docsAgentConnection || 'docsagent_connection');
+    if (mode === 'live') {
+      scopeBadge.style.background = '#d1fae5';
+      scopeBadge.style.color = '#065f46';
+      scopeBadge.style.border = '1px solid #6ee7b7';
+      scopeBadge.innerHTML = '✅ <strong>Live Zoho CRM Data</strong> — Fetched via <code>GET /crm/v8/settings/automation/workflow_rules</code> using Scope <code>ZohoCRM.settings.workflow_rules.READ</code> on Named Connection <code>' + conn + '</code>';
+    } else if (mode === 'simulated') {
+      scopeBadge.style.background = '#eff6ff';
+      scopeBadge.style.color = '#1e40af';
+      scopeBadge.style.border = '1px solid #bfdbfe';
+      scopeBadge.innerHTML = '⚡ <strong>Zoho CRM API v8 Workflows Active</strong> — Scope <code>ZohoCRM.settings.workflow_rules.READ</code> mapped to <code>' + conn + '</code>';
+    } else if (mode === 'scope_error') {
+      scopeBadge.style.background = '#fee2e2';
+      scopeBadge.style.color = '#991b1b';
+      scopeBadge.style.border = '1px solid #fca5a5';
+      scopeBadge.innerHTML = '❌ <strong>OAuth Scope Missing</strong> — Add <code>ZohoCRM.settings.workflow_rules.READ</code> (or <code>ZohoCRM.settings.workflow_rules.ALL</code>) to Connection <code>' + conn + '</code> in Zoho CRM Setup';
+    }
+  }
+
+  // ==========================================
+  // SINGLE WORKFLOW DETAIL MODAL (API v8)
+  // Endpoint: GET /settings/automation/workflow_rules/{id}
+  // Reference: https://www.zoho.com/crm/developer/docs/api/v8/get-a-workflow.html
+  // ==========================================
+  function switchModalTab(tabKey) {
+    document.querySelectorAll('.wf-modal-tab-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-modaltab') === tabKey);
+    });
+    const tabs = {
+      overview: document.getElementById('modalTabOverview'),
+      conditions: document.getElementById('modalTabConditions'),
+      json: document.getElementById('modalTabJson')
+    };
+    Object.keys(tabs).forEach(k => {
+      if (tabs[k]) {
+        tabs[k].style.display = (k === tabKey) ? 'block' : 'none';
+        tabs[k].classList.toggle('active', k === tabKey);
+      }
+    });
+  }
+
+  function closeWorkflowModal() {
+    if (dom.workflowDetailModal) {
+      dom.workflowDetailModal.style.display = 'none';
+    }
+    state.currentModalWorkflowId = null;
+  }
+
+  function copyModalJson() {
+    if (!dom.modalRawJson) return;
+    const text = dom.modalRawJson.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      if (dom.btnCopyModalJson) {
+        dom.btnCopyModalJson.textContent = '✓ Copied!';
+        setTimeout(() => { dom.btnCopyModalJson.textContent = '📋 Copy JSON'; }, 2000);
+      }
+    });
+  }
+
+  async function openWorkflowDetailModal(workflowId) {
+    state.currentModalWorkflowId = workflowId;
+    switchModalTab('overview');
+
+    let wf = state.allWorkflowsList.find(w => String(w.id) === String(workflowId));
+    let rawData = wf ? (wf._raw || wf) : null;
+
+    if (dom.workflowDetailModal) {
+      dom.workflowDetailModal.style.display = 'flex';
+    }
+
+    // Try fetching fresh specific workflow via API v8
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM?.CONNECTION?.invoke) {
+      try {
+        const singleResp = await withTimeout(
+          invokeZohoConnectionAPI(docsConn, {
+            endpoint: `/crm/v8/settings/automation/workflow_rules/${workflowId}`,
+            method: 'GET'
+          }),
+          4000,
+          null
+        );
+        if (singleResp?.workflow_rules?.[0]) {
+          rawData = singleResp.workflow_rules[0];
+        }
+      } catch (err) {
+        console.log('[Workflow Single API notice]:', err.message);
+      }
+    } else {
+      // Standalone mode: fetch from local v8 endpoint
+      try {
+        const resp = await fetch(`/api/crm/workflows/${workflowId}`).then(r => r.json());
+        if (resp?.workflow_rules?.[0]) {
+          rawData = resp.workflow_rules[0];
+        }
+      } catch (_) {}
+    }
+
+    // Populate Overview
+    const wfName = rawData?.name || wf?.name || 'Workflow Rule';
+    const wfId = rawData?.id || workflowId;
+    const modName = (rawData?.module && (rawData.module.api_name || rawData.module)) || wf?.module || 'Unknown';
+    const isActive = (rawData?.status?.active === true || rawData?.active === true || wf?.status === 'active');
+    const trigger = rawData?.execute_when?.type || wf?.trigger_type || 'on_record_action';
+    const criteria = (rawData?.execute_when?.details?.criteria) || (rawData?.conditions?.[0]?.criteria_details?.criteria?.value) || wf?.criteria || 'Always Execute';
+    const desc = rawData?.description || wf?.description || 'No description provided';
+    const createdBy = rawData?.created_by?.name || 'Administrator';
+    const createdTime = rawData?.created_time ? new Date(rawData.created_time).toLocaleString() : 'N/A';
+    const modifiedBy = rawData?.modified_by?.name || 'Administrator';
+    const modifiedTime = rawData?.modified_time ? new Date(rawData.modified_time).toLocaleString() : 'N/A';
+    const source = rawData?.source || 'crm';
+
+    if (dom.modalWorkflowName) dom.modalWorkflowName.textContent = wfName;
+    if (dom.modalWorkflowId) dom.modalWorkflowId.textContent = `ID: ${wfId}`;
+    if (dom.modalWfModule) dom.modalWfModule.innerHTML = `<span class="badge badge-blue">${escapeHtml(modName)}</span>`;
+    if (dom.modalWfStatus) dom.modalWfStatus.innerHTML = `<span class="badge ${isActive ? 'badge-green' : 'badge-gray'}">${isActive ? '● Active' : '○ Inactive'}</span>`;
+    if (dom.modalWfTrigger) dom.modalWfTrigger.innerHTML = `<span class="badge badge-purple">${escapeHtml(formatTriggerType(trigger))}</span>`;
+    if (dom.modalWfSource) dom.modalWfSource.innerHTML = `<code>${escapeHtml(source)}</code>`;
+    if (dom.modalWfCreated) dom.modalWfCreated.textContent = `${createdTime} (${createdBy})`;
+    if (dom.modalWfModified) dom.modalWfModified.textContent = `${modifiedTime} (${modifiedBy})`;
+    if (dom.modalWfDesc) dom.modalWfDesc.textContent = desc;
+    if (dom.modalWfCriteria) dom.modalWfCriteria.textContent = typeof criteria === 'object' ? JSON.stringify(criteria, null, 2) : String(criteria);
+
+    // Populate Conditions & Actions
+    let condHtml = '';
+    const conditions = rawData?.conditions || [];
+    if (Array.isArray(conditions) && conditions.length > 0) {
+      conditions.forEach((c, cIdx) => {
+        const instantActs = c.instant_actions?.actions || [];
+        const schedActs = c.scheduled_actions || [];
+        const critObj = c.criteria_details?.criteria;
+        const critText = critObj ? `${critObj.field?.api_name || 'Field'} ${critObj.comparator || 'equals'} ${critObj.value || ''}` : 'No conditions specified';
+
+        condHtml += `
+          <div class="wizard-step-box" style="margin-bottom:12px;">
+            <div class="wizard-step-title">
+              <span class="wizard-step-badge">${c.sequence_number || cIdx + 1}</span>
+              Condition Rule #${c.sequence_number || cIdx + 1}
+            </div>
+            <div style="font-size:12px; margin-bottom:8px;">
+              <strong>Criteria:</strong> <code>${escapeHtml(critText)}</code>
+            </div>
+            <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">
+              Instant Actions (${instantActs.length}):
+            </div>
+            <div style="margin-bottom:10px;">
+              ${instantActs.map(a => formatActionTag(a.name ? `${a.type || 'Action'}: ${a.name}` : a)).join(' ') || '<em style="color:var(--text-light); font-size:11.5px;">None</em>'}
+            </div>
+            ${schedActs.length > 0 ? `
+              <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">
+                Scheduled Actions:
+              </div>
+              <div>${schedActs.map(sa => `<span class="badge badge-yellow">⏱️ Delay: ${sa.execute_after?.unit || 1} ${sa.execute_after?.period || 'days'}</span>`).join(' ')}</div>
+            ` : ''}
+          </div>
+        `;
+      });
+    } else {
+      const acts = wf?.actions || rawData?.actions || [];
+      condHtml = `
+        <div class="wizard-step-box">
+          <div class="wizard-step-title"><span class="wizard-step-badge">1</span> Default Execution Rule</div>
+          <div style="font-size:12px; margin-bottom:8px;"><strong>Trigger Criteria:</strong> <code>${escapeHtml(String(criteria))}</code></div>
+          <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">Configured Actions (${acts.length}):</div>
+          <div>${acts.map(act => formatActionTag(act)).join(' ') || '<em>None</em>'}</div>
+        </div>
+      `;
+    }
+    if (dom.modalConditionsContainer) dom.modalConditionsContainer.innerHTML = condHtml;
+
+    // Populate Raw JSON matching get-a-workflow.html
+    if (dom.modalRawJson) {
+      dom.modalRawJson.textContent = JSON.stringify({
+        workflow_rules: [rawData || wf]
+      }, null, 2);
     }
   }
 
@@ -1005,6 +1571,264 @@
   }
 
   // ==========================================
+  // WORKFLOW EXPLORER & AI SELECTOR ENGINE
+  // ==========================================
+  function renderWorkflowsTable(snapshot) {
+    const modules = snapshot.modules || [];
+    const wfs = [];
+
+    modules.forEach(m => {
+      (m.workflows || []).forEach(w => {
+        wfs.push({
+          ...w,
+          module: m.module
+        });
+      });
+    });
+
+    state.allWorkflowsList = wfs;
+
+    if (dom.workflowTotalCountBadge) {
+      dom.workflowTotalCountBadge.textContent = `${wfs.length} Workflows Loaded`;
+    }
+    if (dom.statWorkflowsCount) {
+      dom.statWorkflowsCount.textContent = wfs.length;
+    }
+
+    filterAndRenderWorkflows();
+  }
+
+  function getVisibleWorkflows() {
+    const query = (dom.searchWorkflowInput?.value || '').toLowerCase().trim();
+    const modFilter = dom.filterWorkflowModule?.value || 'ALL';
+    const statusFilter = dom.filterWorkflowStatus?.value || 'ALL';
+
+    return state.allWorkflowsList.filter(w => {
+      const matchesMod = (modFilter === 'ALL' || w.module === modFilter);
+      const isActive = w.status === 'active' || (w.status && w.status.active === true) || w.status === true;
+      const matchesStatus = (statusFilter === 'ALL') ||
+        (statusFilter === 'active' && isActive) ||
+        (statusFilter === 'inactive' && !isActive);
+      const matchesSearch = !query ||
+        w.name.toLowerCase().includes(query) ||
+        (w.id && String(w.id).toLowerCase().includes(query)) ||
+        w.module.toLowerCase().includes(query) ||
+        (w.criteria && String(w.criteria).toLowerCase().includes(query)) ||
+        (w.actions && w.actions.some(a => String(a).toLowerCase().includes(query)));
+      return matchesMod && matchesStatus && matchesSearch;
+    });
+  }
+
+  function filterAndRenderWorkflows() {
+    if (!dom.workflowTableBody) return;
+    const visible = getVisibleWorkflows();
+
+    if (visible.length === 0) {
+      dom.workflowTableBody.innerHTML = `
+        <tr>
+          <td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">
+            No workflow rules found matching the criteria.
+          </td>
+        </tr>
+      `;
+      updateWorkflowSelectionUI();
+      return;
+    }
+
+    let html = '';
+    visible.forEach(w => {
+      const isSelected = state.selectedWorkflowIds.has(w.id);
+      const triggerLabel = formatTriggerType(w.trigger_type || (w.execute_when && w.execute_when.type) || 'on_record_action');
+      const actionsHtml = (w.actions || []).map(act => formatActionTag(act)).join(' ') || '<span class="badge badge-gray">None</span>';
+      const isActive = w.status === 'active' || (w.status && w.status.active === true) || w.status === true;
+
+      html += `
+        <tr class="${isSelected ? 'wf-row-selected' : ''}" data-wfid="${escapeHtml(w.id)}">
+          <td style="text-align:center;">
+            <input type="checkbox" class="wf-checkbox wf-row-chk" data-wfid="${escapeHtml(w.id)}" ${isSelected ? 'checked' : ''} />
+          </td>
+          <td>
+            <strong>${escapeHtml(w.name)}</strong>
+            <div style="font-size:11px; color:var(--text-muted); font-family:monospace;">${escapeHtml(w.id)}</div>
+          </td>
+          <td><span class="badge badge-blue">${escapeHtml(w.module)}</span></td>
+          <td><span class="badge badge-purple">${escapeHtml(triggerLabel)}</span></td>
+          <td style="font-size:12px; max-width:200px; word-break:break-word;">
+            ${w.criteria ? escapeHtml(w.criteria) : '<em style="color:var(--text-light);">Always Execute</em>'}
+          </td>
+          <td style="max-width:240px;">${actionsHtml}</td>
+          <td>
+            <span class="badge ${isActive ? 'badge-green' : 'badge-gray'}">
+              ${isActive ? '● Active' : '○ Inactive'}
+            </span>
+          </td>
+          <td style="text-align:right; white-space:nowrap;">
+            <button class="btn-view-single-wf" data-wfid="${escapeHtml(w.id)}" title="Get workflow API v8 spec &amp; details">
+              👁️ Details
+            </button>
+            <button class="btn-doc-single-wf" data-wfid="${escapeHtml(w.id)}" title="Generate documentation specifically for this workflow">
+              ⚡ Document
+            </button>
+          </td>
+        </tr>
+      `;
+    });
+
+    dom.workflowTableBody.innerHTML = html;
+
+    // Bind row checkboxes
+    dom.workflowTableBody.querySelectorAll('.wf-row-chk').forEach(chk => {
+      chk.addEventListener('change', (e) => {
+        const id = chk.getAttribute('data-wfid');
+        if (e.target.checked) {
+          state.selectedWorkflowIds.add(id);
+        } else {
+          state.selectedWorkflowIds.delete(id);
+        }
+        updateWorkflowSelectionUI();
+      });
+    });
+
+    // Bind single view details button (Get a workflow API v8)
+    dom.workflowTableBody.querySelectorAll('.btn-view-single-wf').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-wfid');
+        openWorkflowDetailModal(id);
+      });
+    });
+
+    // Bind single document buttons
+    dom.workflowTableBody.querySelectorAll('.btn-doc-single-wf').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-wfid');
+        state.selectedWorkflowIds.clear();
+        state.selectedWorkflowIds.add(id);
+        updateWorkflowSelectionUI();
+        documentSelectedWorkflows();
+      });
+    });
+
+    updateWorkflowSelectionUI();
+  }
+
+  function updateWorkflowSelectionUI() {
+    const count = state.selectedWorkflowIds.size;
+    if (dom.workflowSelectedCountBadge) {
+      dom.workflowSelectedCountBadge.textContent = `${count} Selected`;
+      dom.workflowSelectedCountBadge.className = count > 0 ? 'badge badge-green' : 'badge badge-blue';
+    }
+    if (dom.btnDocSelectedCount) {
+      dom.btnDocSelectedCount.textContent = count;
+    }
+    if (dom.btnDocSelectedWorkflows) {
+      dom.btnDocSelectedWorkflows.disabled = (count === 0);
+    }
+
+    if (dom.workflowTableBody) {
+      dom.workflowTableBody.querySelectorAll('tr[data-wfid]').forEach(tr => {
+        const id = tr.getAttribute('data-wfid');
+        const isSelected = state.selectedWorkflowIds.has(id);
+        tr.classList.toggle('wf-row-selected', isSelected);
+        const chk = tr.querySelector('.wf-row-chk');
+        if (chk) chk.checked = isSelected;
+      });
+    }
+
+    if (dom.chkWorkflowHeaderAll) {
+      const visible = getVisibleWorkflows();
+      if (visible.length === 0) {
+        dom.chkWorkflowHeaderAll.checked = false;
+        dom.chkWorkflowHeaderAll.indeterminate = false;
+      } else {
+        const selectedVisible = visible.filter(w => state.selectedWorkflowIds.has(w.id)).length;
+        dom.chkWorkflowHeaderAll.checked = (selectedVisible === visible.length);
+        dom.chkWorkflowHeaderAll.indeterminate = (selectedVisible > 0 && selectedVisible < visible.length);
+      }
+    }
+  }
+
+  function formatTriggerType(type) {
+    const map = {
+      'on_record_create': 'On Create',
+      'on_record_edit': 'On Edit',
+      'create_or_edit': 'Create / Edit',
+      'field_update': 'Field Update',
+      'incoming_call_createedit': 'Incoming Call',
+      'email_received': 'Email Received',
+      'overdue': 'Overdue Time',
+      'scheduled': 'Scheduled Cron'
+    };
+    return map[type] || type.replace(/_/g, ' ');
+  }
+
+  function formatActionTag(actionStr) {
+    let cls = 'field_update';
+    let icon = '⚡';
+    const lower = String(actionStr).toLowerCase();
+    if (lower.includes('webhook')) {
+      cls = 'webhook';
+      icon = '🔌';
+    } else if (lower.includes('function') || lower.includes('fn_') || lower.includes('deluge')) {
+      cls = 'function';
+      icon = '⚙️';
+    } else if (lower.includes('email') || lower.includes('alert')) {
+      cls = 'email';
+      icon = '✉️';
+    } else if (lower.includes('task') || lower.includes('assign')) {
+      cls = 'task';
+      icon = '📋';
+    }
+    return `<span class="action-pill-tag ${cls}">${icon} ${escapeHtml(actionStr)}</span>`;
+  }
+
+  async function documentSelectedWorkflows() {
+    const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
+    if (selectedWfs.length === 0) {
+      alert('Please select at least one workflow to document.');
+      return;
+    }
+
+    switchTab('tab-docs');
+    if (dom.selectDocType) {
+      dom.selectDocType.value = 'workflow_spec';
+    }
+
+    dom.btnGenerateDocs.disabled = true;
+    dom.btnGenerateDocs.innerHTML = `<span>Claude is documenting ${selectedWfs.length} Workflow(s)...</span>`;
+    dom.docRenderedOutput.innerHTML = `
+      <div style="text-align:center; padding:50px; color:var(--text-muted);">
+        <div class="status-dot" style="margin-bottom:8px;"></div>
+        <p>Generating targeted AI Workflow Automation Architecture &amp; Diagrams for <strong>${selectedWfs.length} selected rule(s)</strong>...</p>
+      </div>
+    `;
+
+    try {
+      const payload = {
+        doc_type: 'workflow_spec',
+        audience: dom.selectAudience?.value || 'admin',
+        snapshot: state.activeSnapshot,
+        selected_workflows: selectedWfs,
+        workflow_ids: selectedWfs.map(w => w.id)
+      };
+
+      const resp = await apiCall('/generate', payload);
+      state.generatedMarkdown = resp.markdown || '';
+      dom.docVersionBadge.textContent = `Workflows: ${selectedWfs.length} Rules Documented`;
+      dom.docModelBadge.textContent = `Model: ${resp.model || 'Claude 3.5 Sonnet'}`;
+
+      renderMarkdownOutput(state.generatedMarkdown);
+    } catch (err) {
+      console.error('Workflow doc generation failed:', err);
+      dom.docRenderedOutput.innerHTML = `<p style="color:var(--danger);">Error generating workflow documentation: ${escapeHtml(err.message)}</p>`;
+    } finally {
+      dom.btnGenerateDocs.disabled = false;
+      dom.btnGenerateDocs.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Generate with Claude';
+    }
+  }
+
+  // ==========================================
   // 2. LIVING DOCS STUDIO
   // ==========================================
   async function generateDocs() {
@@ -1013,15 +1837,21 @@
     dom.docRenderedOutput.innerHTML = '<div style="text-align:center; padding:50px; color:var(--text-muted);"><div class="status-dot" style="margin-bottom:8px;"></div><p>Generating living documentation with Claude &amp; mapping components...</p></div>';
 
     try {
+      const isWorkflowDoc = (dom.selectDocType.value === 'workflow_spec');
+      const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
+      const targetWorkflows = (selectedWfs.length > 0) ? selectedWfs : state.allWorkflowsList;
+
       const payload = {
         doc_type: dom.selectDocType.value,
         audience: dom.selectAudience.value,
-        snapshot: state.activeSnapshot
+        snapshot: state.activeSnapshot,
+        selected_workflows: isWorkflowDoc ? targetWorkflows : (selectedWfs.length > 0 ? selectedWfs : undefined),
+        workflow_ids: isWorkflowDoc ? targetWorkflows.map(w => w.id) : (selectedWfs.length > 0 ? selectedWfs.map(w => w.id) : undefined)
       };
 
       const resp = await apiCall('/generate', payload);
       state.generatedMarkdown = resp.markdown || '';
-      dom.docVersionBadge.textContent = `Baseline: ${resp.snapshot_id || 'snap_v2.0'}`;
+      dom.docVersionBadge.textContent = isWorkflowDoc ? `Workflows: ${targetWorkflows.length} Rules Documented` : `Baseline: ${resp.snapshot_id || 'snap_v2.0'}`;
       dom.docModelBadge.textContent = `Model: ${resp.model || 'Claude 3.5 Sonnet'}`;
 
       // Render Markdown & Mermaid Flowcharts

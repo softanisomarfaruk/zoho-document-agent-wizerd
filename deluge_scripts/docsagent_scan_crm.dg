@@ -75,13 +75,13 @@ for each mod in targetModules
 	}
 	modData.put("fields", fieldList);
 	
-	// 2. Fetch Workflow Automation rules
+	// 2. Fetch Workflow Automation rules (Zoho CRM API v8)
 	wfList = list();
 	wfResp = invokeurl
 	[
-		url :"https://www.zohoapis.com/crm/v6/settings/automation/workflow_rules?module=" + mod
+		url :"https://www.zohoapis.com/crm/v8/settings/automation/workflow_rules?module=" + mod
 		type :GET
-		connection:"zoho_crm_conn"
+		connection:"docsagent_connection"
 	];
 	
 	if(wfResp != null && wfResp.containsKey("workflow_rules"))
@@ -91,8 +91,29 @@ for each mod in targetModules
 			wMap = Map();
 			wMap.put("id", w.get("id"));
 			wMap.put("name", w.get("name"));
-			wMap.put("status", ifnull(w.get("status"), "active"));
-			wMap.put("trigger_type", ifnull(w.get("trigger_type"), "on_record_action"));
+			
+			// API v8 status can be map or string
+			wStatus = "active";
+			if(w.containsKey("status") && w.get("status") != null)
+			{
+				if(w.get("status").toString().contains("active"))
+				{
+					wStatus = "active";
+				}
+				else
+				{
+					wStatus = "inactive";
+				}
+			}
+			wMap.put("status", wStatus);
+			
+			// API v8 execute_when
+			trigType = "on_record_action";
+			if(w.containsKey("execute_when") && w.get("execute_when") != null && w.get("execute_when").containsKey("type"))
+			{
+				trigType = w.get("execute_when").get("type");
+			}
+			wMap.put("trigger_type", trigType);
 			wMap.put("criteria", ifnull(w.get("criteria"), ""));
 			
 			actionsList = list();
@@ -105,7 +126,7 @@ for each mod in targetModules
 			}
 			wMap.put("actions", actionsList);
 			
-			wfContent = mod + ":" + w.get("name") + ":" + ifnull(w.get("status"), "") + ":" + ifnull(w.get("criteria"), "");
+			wfContent = mod + ":" + w.get("name") + ":" + wStatus + ":" + ifnull(w.get("criteria"), "");
 			wMap.put("hash", md5(wfContent));
 			wfList.add(wMap);
 			totalWorkflows = totalWorkflows + 1;

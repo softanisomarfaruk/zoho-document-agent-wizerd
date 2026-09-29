@@ -21,15 +21,31 @@ systemPrompt = "You are the Zoho Living Documentation Agent. You generate author
 "4. Tag sections with Source Component IDs in bracketed badges (e.g. `[Component: mod_Leads]`, `[Workflow: Lead_Qualification]`).\n" +
 "5. Always append footer: '> *AI-generated Living Documentation · Reviewed by: ____________*'\n";
 
-userPrompt = "Generate comprehensive " + docType + " documentation tailored for " + audience + " audience.\n\n" +
-"Here is the normalized Zoho CRM configuration snapshot:\n" + scanJsonStr + "\n\n" +
-"Structure your response with:\n" +
-"# 1. System Overview & Executive Summary\n" +
-"# 2. Module & Field Dictionary (with tables: Field Label, API Name, Type, Mandatory, Notes)\n" +
-"# 3. Automations & Workflow Logic (Trigger, Criteria, Actions executed)\n" +
-"# 4. Blueprint & State Transition Flowchart (in Mermaid format)\n" +
-"# 5. Custom Functions, Webhooks & Integrations\n" +
-"# 6. Administration & Maintenance Notes\n";
+userPrompt = "";
+if(docType == "workflow_spec")
+{
+	userPrompt = "Generate dedicated Zoho CRM Workflow Automation Architecture & Engineering Specification tailored for " + audience + " audience.\n\n" +
+	"Here is the normalized Zoho CRM configuration snapshot:\n" + scanJsonStr + "\n\n" +
+	"Structure your response with:\n" +
+	"# 1. Executive Workflow Automation Summary & Execution Hierarchy\n" +
+	"# 2. Trigger-Condition-Action (TCA) Engineering Matrix\n" +
+	"# 3. End-to-End Workflow Flowchart (Mermaid syntax)\n" +
+	"# 4. Integrations, Webhook Payloads & Deluge Dependencies\n" +
+	"# 5. Failure Modes, Race Conditions & Loop Prevention Analysis\n" +
+	"# 6. Administration, Maintenance & Audit Log\n";
+}
+else
+{
+	userPrompt = "Generate comprehensive " + docType + " documentation tailored for " + audience + " audience.\n\n" +
+	"Here is the normalized Zoho CRM configuration snapshot:\n" + scanJsonStr + "\n\n" +
+	"Structure your response with:\n" +
+	"# 1. System Overview & Executive Summary\n" +
+	"# 2. Module & Field Dictionary (with tables: Field Label, API Name, Type, Mandatory, Notes)\n" +
+	"# 3. Automations & Workflow Logic (Trigger, Criteria, Actions executed)\n" +
+	"# 4. Blueprint & State Transition Flowchart (in Mermaid format)\n" +
+	"# 5. Custom Functions, Webhooks & Integrations\n" +
+	"# 6. Administration & Maintenance Notes\n";
+}
 
 // 2. Fetch Claude API credentials
 claudeUrl = "https://api.anthropic.com/v1/messages";

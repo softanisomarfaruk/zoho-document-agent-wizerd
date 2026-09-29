@@ -99,36 +99,70 @@ Authorization: Zoho-oauthtoken <ACCESS_TOKEN>
 
 ---
 
-## 4. Claude API & WorkDrive Configuration
+---
 
-Open the widget and click on the **Settings & Demo Hub** tab:
-- **Claude API Key**: Enter your Anthropic key (`sk-ant-...`).
-- **AI Model**: `claude-3-5-sonnet-20241022` (default).
-- **WorkDrive Folder ID**: Target Team Folder ID for PDF export.
-- Click **Save Settings**.
+## 4. Required Zoho CRM OAuth Scopes & Connections
+
+To enable full metadata scanning, workflow extraction (API v8), and auto-provisioning:
+
+In **Zoho CRM -> Setup -> Developer Space -> Connections -> Add Connection -> Zoho OAuth**:
+
+| Required Scope | Purpose |
+| :--- | :--- |
+| **`ZohoCRM.settings.workflow_rules.ALL`** | **[Zoho CRM API v8]** Full read and automation access to all Workflow rules and actions (`GET /crm/v8/settings/automation/workflow_rules`). |
+| **`ZohoCRM.settings.workflow_rules.READ`** | **[Zoho CRM API v8]** Retrieves all Workflow automation rules, trigger events, criteria, and actions (`GET /crm/v8/settings/automation/workflow_rules`). |
+| **`ZohoCRM.settings.fields.READ`** | Retrieves field dictionaries, mandatory flags, and picklist options. |
+| **`ZohoCRM.settings.modules.READ`** | Retrieves all standard and custom CRM modules list. |
+| **`ZohoCRM.modules.ALL`** | Manages custom module records for `Living_Docs_Settings` & `Living_Docs_Snapshots`. |
+| **`WorkDrive.files.ALL`** | Exports living documentation Markdown & PDF files into Zoho WorkDrive. |
 
 ---
 
-## 5. Local Development & Standalone Testing
+## 5. Workflow Rules & AI Documentation Selector (API v8)
+
+1. **Scan CRM**: Click **Run Full Scan**. The agent queries `GET /crm/v8/settings/automation/workflow_rules` and displays active workflow rules with real-time counters.
+2. **Individual / Multi-Selection**:
+   - Filter workflows by module (Leads, Deals, Accounts, Contacts) or search query.
+   - Select specific workflow rule checkboxes.
+3. **Generate Targeted AI Documentation**:
+   - Click **✨ Generate AI Documentation for Selected Workflows** or click **⚡ Document** on any individual rule.
+   - Claude AI generates a dedicated **Workflow Automation Architecture Spec** including execution hierarchy, Trigger-Condition-Action matrix, Mermaid flowchart, and loop protection analysis.
+
+---
+
+## 6. Local Development & Standalone Testing
+
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Start server:
+   ```bash
+   npm start
+   ```
+3. Open `http://localhost:5000` or `https://127.0.0.1:5000/app/widget.html`.
+
+
+## 6. Local Development & Standalone Testing
 
 You can run and test the complete solution standalone in any modern browser:
 ```bash
 npm start
 ```
 - Open: `https://127.0.0.1:5000/app/widget.html` or `http://localhost:5000/app/widget.html`
-- All features (Scanning, Document Generation, Drift Detection, Visual Diff, Ask AI, Function Builder, Simulation Hub) work out-of-the-box.
+- All features (Scanning, Workflow Rules Explorer, Multi-Select AI Doc Generator, Living Docs Studio, Drift Radar, Visual Diff, Simulation Hub) work out-of-the-box.
 
 ---
 
-## 6. 8-Minute Live Demo Walkthrough Script
+## 7. Demo Walkthrough Script
 
 | Step | Time | Action in Widget | Audience Experience & Talking Track |
 | :---: | :---: | :--- | :--- |
-| **1** | 0:00 - 1:00 | **Launch Widget** | Show header: `⚡ Custom Module Auto-Provisioned`, Org Connected, Claude 3.5 Sonnet active. Zero manual Deluge setup required. |
-| **2** | 1:00 - 2:00 | **Scan CRM Metadata** | Click **Run Full Scan**. Scans Modules, Fields, Workflows, Blueprints, Functions. Show computed SHA-256/MD5 hashes per component. |
-| **3** | 2:00 - 3:30 | **Generate Living Docs** | Switch to **Living Docs Studio**. Click **Generate with Claude**. Audience sees System Architecture, Field Dictionary, Mermaid flowchart, and WorkDrive export. |
-| **4** | 3:30 - 4:30 | **Ask AI Assistant** | Switch to **Ask AI**. Click suggestion: *"How does a lead become a deal?"*. Agent replies step-by-step citing `[mod_Leads]`, `[wf_Lead_Auto_Convert]`, `[bp_dl_01]`. |
-| **5** | 4:30 - 5:30 | **Simulate Live CRM Change** | In **Settings & Demo Hub**, click **Scenario 1: Add Lead VIP Field** or **Scenario 2: Modify Deal Workflow**. |
-| **6** | 5:30 - 6:30 | **Detect Documentation Drift** | Switch to **Drift Detection**. Radar shows 🟡 **Drift Detected**. Table pinpoints exact delta: *"Field VIP_Customer_Tier added to Leads"*. |
-| **7** | 6:30 - 7:15 | **Visual Diff & 1-Click Sync** | Show side-by-side Before/After Diff. Click **⚡ Regenerate Affected Only**. Only outdated sections update in seconds! |
-| **8** | 7:15 - 8:00 | **Function Builder (Bonus)** | Switch to **Function Builder**. Type: *"Send Closed Won deal info to Stripe billing API"*. Deluge code + safety check generated + auto-documented! |
+| **1** | 0:00 - 1:00 | **Launch Widget** | Show header: `⚡ Custom Module Auto-Provisioned`, Org Connected, Claude AI active. Zero manual Deluge setup required. |
+| **2** | 1:00 - 2:00 | **Scan CRM Metadata** | Click **Run Full Scan**. Scans Modules, Fields, Workflows (API v8), Blueprints, Functions. Show computed hashes per component. |
+| **3** | 2:00 - 3:30 | **Explore & Filter Workflows** | View total workflow count badge, filter by module or search keyword. Inspect trigger events and actions. |
+| **4** | 3:30 - 4:45 | **Generate Targeted Workflow Docs** | Select specific workflows (or click ⚡ Document on an individual rule) → Click **Generate AI Documentation**. Claude generates full Trigger-Action Matrix, execution order, and Mermaid flowchart. |
+| **5** | 4:45 - 5:45 | **Generate Living System Docs** | Switch to **Living Docs Studio**. Click **Generate with Claude**. View complete System Architecture, Field Dictionary, and WorkDrive export. |
+| **6** | 5:45 - 6:45 | **Simulate CRM Change & Detect Drift** | In **Settings & Demo Hub**, click a drift simulation scenario. Radar detects drift, pinpointing exact deltas. |
+| **7** | 6:45 - 7:30 | **Visual Diff & 1-Click Sync** | Inspect side-by-side Before/After Diff. Click **⚡ Regenerate Affected Only** to update living documentation in seconds. |
+

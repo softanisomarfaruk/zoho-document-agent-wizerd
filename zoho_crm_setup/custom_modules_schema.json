@@ -1,0 +1,90 @@
+{
+  "description": "Zoho CRM Custom Modules Schema for Living Documentation Agent Snapshot & Drift Persistence",
+  "modules": [
+    {
+      "module_name": "Living Docs Snapshots",
+      "singular_label": "Living Docs Snapshot",
+      "plural_label": "Living Docs Snapshots",
+      "fields": [
+        {
+          "api_name": "Name",
+          "field_label": "Snapshot Title",
+          "data_type": "text",
+          "max_length": 150,
+          "required": true,
+          "description": "e.g. Snapshot_20260929_1530"
+        },
+        {
+          "api_name": "Snapshot_JSON",
+          "field_label": "Snapshot JSON Payload",
+          "data_type": "textarea",
+          "max_length": 65535,
+          "required": true,
+          "description": "Normalized JSON structure of scanned modules, fields, workflows, blueprints"
+        },
+        {
+          "api_name": "Component_Hashes",
+          "field_label": "Component Hashes Map",
+          "data_type": "textarea",
+          "max_length": 32000,
+          "description": "JSON hash map of each component ID to its cryptographic hash"
+        },
+        {
+          "api_name": "Status",
+          "field_label": "Status",
+          "data_type": "picklist",
+          "pick_list_values": ["Active Baseline", "Archived", "Draft"],
+          "required": true
+        },
+        {
+          "api_name": "Generated_Markdown",
+          "field_label": "Generated Documentation Markdown",
+          "data_type": "textarea",
+          "max_length": 65535
+        },
+        {
+          "api_name": "WorkDrive_File_URL",
+          "field_label": "WorkDrive File Link",
+          "data_type": "url"
+        }
+      ]
+    },
+    {
+      "module_name": "Doc Drift Logs",
+      "singular_label": "Doc Drift Log",
+      "plural_label": "Doc Drift Logs",
+      "fields": [
+        {
+          "api_name": "Name",
+          "field_label": "Drift Event ID",
+          "data_type": "text",
+          "max_length": 100,
+          "required": true
+        },
+        {
+          "api_name": "Total_Changes",
+          "field_label": "Total Changes Count",
+          "data_type": "integer"
+        },
+        {
+          "api_name": "Changed_Components",
+          "field_label": "Changed Components Summary",
+          "data_type": "textarea",
+          "max_length": 32000
+        },
+        {
+          "api_name": "Affected_Doc_Sections",
+          "field_label": "Affected Document Sections",
+          "data_type": "textarea",
+          "max_length": 32000
+        },
+        {
+          "api_name": "Resolution_Status",
+          "field_label": "Resolution Status",
+          "data_type": "picklist",
+          "pick_list_values": ["Open Drift", "Auto-Resolved", "Ignored"]
+        }
+      ]
+    }
+  ]
+}

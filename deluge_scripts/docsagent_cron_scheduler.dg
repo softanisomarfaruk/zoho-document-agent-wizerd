@@ -1,0 +1,66 @@
+/*
+  Zoho Living Documentation Agent - Scheduled Drift Monitor
+  Function: docsagent_cron_scheduler (Can be scheduled daily or weekly in Zoho CRM Schedules / Catalyst Cron)
+  Arguments: None
+  Description:
+    Runs in the background, checks for schema/automation drift against the last baseline.
+    If drift is detected, sends an alert email to the Zoho Administrator with the exact list
+    of outdated documents and provides a 1-click link to review & auto-sync.
+*/
+
+// 1. Run drift check
+driftResult = runLocalFunction("docsagent_check_drift", Map());
+
+if(driftResult != null && driftResult.get("is_drift_detected") == true)
+{
+	totalChanges = driftResult.get("total_changes");
+	changes = driftResult.get("changes");
+	affectedSecs = driftResult.get("affected_sections");
+	
+	// 2. Build email body
+	emailSubject = "⚠️ [Zoho Drift Alert] " + totalChanges + " Schema & Automation Change(s) Detected";
+	
+	emailBody = "<html><body style='font-family: Arial, sans-serif; line-height: 1.5; color: #333;'>" +
+	"<h2 style='color: #d97706;'>Living Documentation Drift Detected</h2>" +
+	"<p>Your Zoho CRM configuration has changed since the last documentation baseline. The following components and documents require updating:</p>" +
+	"<table style='width: 100%; border-collapse: collapse; margin-top: 12px;'>" +
+	"<tr style='background: #f8fafc;'><th style='padding: 8px; border: 1px solid #ddd; text-align: left;'>Module</th><th style='padding: 8px; border: 1px solid #ddd; text-align: left;'>Type</th><th style='padding: 8px; border: 1px solid #ddd; text-align: left;'>Details</th></tr>";
+	
+	for each c in changes
+	{
+		emailBody = emailBody + "<tr>" +
+		"<td style='padding: 8px; border: 1px solid #ddd;'><b>" + c.get("module") + "</b></td>" +
+		"<td style='padding: 8px; border: 1px solid #ddd; color: #b45309;'>" + c.get("type") + "</td>" +
+		"<td style='padding: 8px; border: 1px solid #ddd;'>" + c.get("detail") + "</td>" +
+		"</tr>";
+	}
+	
+	emailBody = emailBody + "</table>" +
+	"<h3 style='margin-top: 16px;'>Outdated Document Sections:</h3><ul>";
+	
+	for each sec in affectedSecs
+	{
+		emailBody = emailBody + "<li><b>" + sec + "</b></li>";
+	}
+	
+	emailBody = emailBody + "</ul>" +
+	"<p style='margin-top: 20px;'><a href='https://crm.zoho.com' style='background: #2563eb; color: #fff; padding: 10px 18px; text-decoration: none; border-radius: 6px; font-weight: bold;'>Open Documentation Agent in CRM</a></p>" +
+	"<p style='font-size: 12px; color: #888;'>Living Documentation Agent · Continuous Governance & Drift Engine</p>" +
+	"</body></html>";
+	
+	// 3. Send email to Admin
+	adminEmail = zoho.adminuserid;
+	sendmail
+	[
+		from: zoho.adminuserid
+		to: adminEmail
+		subject: emailSubject
+		message: emailBody
+	];
+	
+	info "[Drift Monitor] Drift detected (" + totalChanges + " changes). Alert email sent to: " + adminEmail;
+}
+else
+{
+	info "[Drift Monitor] System clean. No drift detected at " + zoho.currenttime.toString();
+}

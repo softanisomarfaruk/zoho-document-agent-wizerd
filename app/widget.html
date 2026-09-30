@@ -3,788 +3,483 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Zoho Living Documentation Agent</title>
+  <title>Living Docs for Zoho CRM</title>
   <link rel="stylesheet" href="css/style.css" />
-  <!-- CDN dependencies for rich rendering: Marked, Mermaid -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
-  </script>
 </head>
 <body>
 
-<div class="app-wrapper" id="mainAppView">
+<div class="app">
 
-  <!-- Top Header Bar -->
-  <header class="top-header">
-    <div class="brand-section">
-      <div class="brand-logo-badge">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-          <polyline points="14 2 14 8 20 8"/>
-          <line x1="16" y1="13" x2="8" y2="13"/>
-          <line x1="16" y1="17" x2="8" y2="17"/>
-          <polyline points="10 9 9 9 8 9"/>
-        </svg>
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
       </div>
-      <div class="brand-title-group">
-        <h1>
-          Living Documentation Agent
-          <span class="challenge-tag">Catalyst Connect · AI Agent</span>
-        </h1>
-        <p>Your Zoho system documents itself · Continuous Schema &amp; Automation Governance</p>
+      <div>
+        <div class="brand-name">Living Docs</div>
+        <div class="brand-sub">Workflow documentation for Zoho CRM</div>
       </div>
     </div>
-
-    <div class="header-status-group">
-      <div class="status-pill" id="headerOrgPill">
-        <span class="status-dot"></span>
-        <span id="headerOrgLabel">Org: Connected</span>
-      </div>
-      <div class="status-pill success" id="headerDriftPill">
-        <span class="status-dot"></span>
-        <span id="headerDriftLabel">Docs: Synced</span>
-      </div>
-      <button class="btn btn-secondary btn-sm" id="btnQuickScan" title="Scan CRM Metadata Now">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Scan CRM
+    <div class="topbar-actions">
+      <span class="org-chip" id="orgChip"><span class="dot"></span><span id="orgChipLabel">Connecting…</span></span>
+      <button class="btn btn-ghost btn-sm" id="btnRescan" title="Reload modules, workflows and functions">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Rescan
+      </button>
+      <button class="btn btn-icon" id="btnOpenSettings" title="Settings">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
   </header>
 
-  <!-- Navigation Tabs -->
-  <nav class="nav-tabs" id="mainNavTabs">
-    <button class="nav-tab-btn active" data-tab="tab-inventory">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-      Scan &amp; Inventory
-    </button>
-    <button class="nav-tab-btn" data-tab="tab-docs">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-      Living Docs Studio
-    </button>
-    <button class="nav-tab-btn tab-drift-alert" data-tab="tab-drift" id="tabBtnDrift">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      Drift Detection <span class="badge-count" id="driftNavBadge" style="display:none;">0</span>
-    </button>
-    <button class="nav-tab-btn" data-tab="tab-settings">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      Settings &amp; Demo Hub
-    </button>
-  </nav>
+  <!-- Shown only while the first check runs. The checklist below appears when something is missing. -->
+  <section class="screen active" id="screenBoot">
+    <div class="setup-card">
+      <div class="setup-head">
+        <h1>Loading Living Docs</h1>
+        <p>Opening your workflows.</p>
+      </div>
+    </div>
+  </section>
 
-  <!-- TAB 1: SCAN & INVENTORY -->
-  <div class="tab-pane active" id="tab-inventory">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            System Metadata &amp; Inventory Scanner
-          </h2>
-          <p>Scans CRM modules, field dictionaries, picklists, workflows, blueprints &amp; custom functions.</p>
-        </div>
-        <div class="d-flex gap-2">
-          <button class="btn btn-primary" id="btnRunFullScan">
-            <span class="btn-label">Run Full Scan</span>
+  <!-- ============ SETUP CHECK ============ -->
+  <section class="screen" id="screenSetup">
+    <div class="setup-card">
+      <div class="setup-head">
+        <h1 id="setupTitle">Checking your setup</h1>
+        <p id="setupSubtitle">Confirming the Zoho CRM connection, saved settings and documentation modules before loading your workflows.</p>
+      </div>
+
+      <ul class="checklist" id="setupChecklist"></ul>
+
+      <div class="setup-form" id="setupForm" hidden>
+        <div class="setup-tabs" id="setupTabs" role="tablist">
+          <button type="button" class="setup-tab current" data-setup-tab="1" role="tab" aria-selected="true">
+            <span class="num">1</span><span>Connection</span>
+          </button>
+          <button type="button" class="setup-tab" data-setup-tab="2" role="tab" aria-selected="false">
+            <span class="num">2</span><span>AI provider</span>
           </button>
         </div>
-      </div>
 
-      <!-- Metric Stats -->
-      <div class="stat-summary-grid">
-        <div class="stat-box">
-          <div class="stat-icon">📦</div>
-          <div class="stat-info">
-            <div class="stat-val" id="statModulesCount">4</div>
-            <div class="stat-title">CRM Modules</div>
+        <div class="setup-tab-panel" id="setupTab1" data-setup-panel="1">
+          <div class="scope-guide">
+            <div class="section-label">Connections and scopes to create</div>
+            <p class="muted small">In Zoho CRM go to Setup, Developer Hub, Connections. Create one connection for each name below. The link name must match exactly. Add every scope on that connection.</p>
+            <div class="scope-grid single">
+              <article class="scope-card">
+                <div class="scope-card-head">
+                  <div>
+                    <div class="scope-service">Zoho CRM</div>
+                    <code>docsagent_connection</code>
+                  </div>
+                  <button type="button" class="btn btn-ghost btn-sm" data-copy="docsagent_connection" data-copy-label="Copy name">Copy name</button>
+                </div>
+                <ul class="scope-list">
+                  <li><code>ZohoCRM.modules.ALL</code><button type="button" class="link-btn" data-copy="ZohoCRM.modules.ALL" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.READ</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.READ" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.modules.ALL</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.modules.ALL" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.modules.READ</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.modules.READ" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.ALL</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.ALL" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.org.READ</code><button type="button" class="link-btn" data-copy="ZohoCRM.org.READ" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.workflow_rules.ALL</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.workflow_rules.ALL" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.workflow_rules.READ</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.workflow_rules.READ" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.settings.functions.ALL</code><button type="button" class="link-btn" data-copy="ZohoCRM.settings.functions.ALL" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.functions.execute.READ</code><button type="button" class="link-btn" data-copy="ZohoCRM.functions.execute.READ" data-copy-label="Copy">Copy</button></li>
+                  <li><code>ZohoCRM.functions.execute.CREATE</code><button type="button" class="link-btn" data-copy="ZohoCRM.functions.execute.CREATE" data-copy-label="Copy">Copy</button></li>
+                </ul>
+                <button type="button" class="btn btn-ghost btn-sm" data-copy="ZohoCRM.modules.ALL&#10;ZohoCRM.settings.READ&#10;ZohoCRM.settings.modules.ALL&#10;ZohoCRM.settings.modules.READ&#10;ZohoCRM.settings.ALL&#10;ZohoCRM.org.READ&#10;ZohoCRM.settings.workflow_rules.ALL&#10;ZohoCRM.settings.workflow_rules.READ&#10;ZohoCRM.settings.functions.ALL&#10;ZohoCRM.functions.execute.READ&#10;ZohoCRM.functions.execute.CREATE" data-copy-label="Copy all scopes">Copy all scopes</button>
+              </article>
+            </div>
           </div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-icon">🏷️</div>
-          <div class="stat-info">
-            <div class="stat-val" id="statFieldsCount">29</div>
-            <div class="stat-title">Configured Fields</div>
-          </div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-icon">⚡</div>
-          <div class="stat-info">
-            <div class="stat-val" id="statWorkflowsCount">5</div>
-            <div class="stat-title">Total Workflows</div>
-            <div class="stat-sub" id="statWorkflowsSub" style="font-size:11px; color:var(--text-muted); margin-top:2px;">Scope: v8 ALL / READ</div>
-          </div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-icon">🗺️</div>
-          <div class="stat-info">
-            <div class="stat-val" id="statBlueprintsCount">2</div>
-            <div class="stat-title">Stage Blueprints</div>
-          </div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-icon">⚙️</div>
-          <div class="stat-info">
-            <div class="stat-val" id="statFunctionsCount">2</div>
-            <div class="stat-title">Deluge Functions</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Scanned Module Inventory Browser -->
-      <div class="card-title-group mb-2">
-        <h3 style="font-size:14px; font-weight:700;">Scanned Components &amp; Cryptographic Hashes</h3>
-      </div>
-      <div class="metadata-table-wrapper mb-4">
-        <table class="data-table" id="inventoryTable">
-          <thead>
-            <tr>
-              <th>Module / Area</th>
-              <th>Component ID</th>
-              <th>Fields</th>
-              <th>Workflows</th>
-              <th>Blueprints</th>
-              <th>Content Hash</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="inventoryTableBody">
-            <!-- Populated via JS -->
-          </tbody>
-        </table>
-      </div>
-
-      <!-- WORKFLOW AUTOMATION RULES & AI SELECTOR SECTION -->
-      <div class="workflow-explorer-card" style="margin-top:20px; border:1px solid var(--border-color); border-radius:10px; padding:18px; background:#ffffff;">
-        <div class="card-header-bar" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border-color);">
-          <div class="card-title-group">
-            <h3 style="font-size:15px; font-weight:700; display:flex; align-items:center; gap:8px;">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-              CRM Workflow Rules (API v8) &amp; AI Documentation Selector
-            </h3>
-            <p style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">
-              Retrieved via <code>GET /crm/v8/settings/automation/workflow_rules</code> using OAuth Scope: <code>ZohoCRM.settings.workflow_rules.ALL</code> / <code>ZohoCRM.settings.workflow_rules.READ</code>. Select workflows to view API specs or generate AI documentation.
-            </p>
-          </div>
-          <div class="d-flex align-center gap-2">
-            <span class="badge badge-purple" id="workflowTotalCountBadge">0 Workflows Loaded</span>
-            <span class="badge badge-blue" id="workflowSelectedCountBadge">0 Selected</span>
-          </div>
+          <div class="section-label">Connection details</div>
+          <p class="muted small">After the connection exists, enter the same link name here. It must match the name above.</p>
+          <label class="field">
+            <span>CRM connection link name</span>
+            <input type="text" id="setupDocsConn" placeholder="docsagent_connection" value="docsagent_connection" />
+            <small>Use <code>docsagent_connection</code> with the CRM scopes listed above.</small>
+          </label>
+          <label class="field" hidden>
+            <span>WorkDrive connection link name</span>
+            <input type="text" id="setupWdConn" placeholder="workdrive_connection" value="workdrive_connection" />
+          </label>
+          <label class="field" hidden>
+            <span>WorkDrive folder ID</span>
+            <input type="text" id="setupWdFolder" placeholder="e.g. 8fy3k2a…" />
+          </label>
         </div>
 
-        <!-- Filter & Action Controls -->
-        <div class="d-flex justify-between align-center gap-3 mb-3 flex-wrap">
-          <div class="d-flex align-center gap-2 flex-wrap">
-            <input type="text" class="form-control" id="searchWorkflowInput" placeholder="🔍 Search workflows (name, criteria, actions)..." style="width:220px; padding:6px 10px; font-size:13px;" />
-            <select class="form-control" id="filterWorkflowModule" style="width:140px; padding:6px 10px; font-size:13px;">
-              <option value="ALL">All Modules</option>
-              <option value="Leads">Leads</option>
-              <option value="Deals">Deals</option>
-              <option value="Accounts">Accounts</option>
-              <option value="Contacts">Contacts</option>
+        <div class="setup-tab-panel" id="setupTab2" data-setup-panel="2" hidden>
+          <div class="section-label">AI provider</div>
+          <p class="muted small" id="setupAiSummary">The API key is saved on the Living Docs Settings record. Leave it blank to keep the one already stored.</p>
+          <label class="field">
+            <span>Provider</span>
+            <select id="setupAiProvider">
+              <option value="">Not set up yet</option>
+              <option value="anthropic">Claude (Anthropic API)</option>
+              <option value="cursor">Cursor (Cloud Agents API)</option>
             </select>
-            <select class="form-control" id="filterWorkflowStatus" style="width:130px; padding:6px 10px; font-size:13px;">
-              <option value="ALL">All Status</option>
-              <option value="active">Active Only</option>
-              <option value="inactive">Inactive Only</option>
-            </select>
-            <button class="btn btn-secondary btn-sm" id="btnRefreshWorkflows" title="Reload workflows directly via Zoho API v8">🔄 Refresh</button>
-            <button class="btn btn-secondary btn-sm" id="btnSelectAllWorkflows">Select All</button>
-            <button class="btn btn-secondary btn-sm" id="btnDeselectAllWorkflows">Clear</button>
-          </div>
-          <div>
-            <button class="btn btn-primary btn-sm" id="btnDocSelectedWorkflows" disabled style="background:var(--accent-gradient); border:none; padding:8px 16px; font-weight:700;">
-              ✨ Generate AI Documentation for Selected (<span id="btnDocSelectedCount">0</span>) &rarr;
-            </button>
+          </label>
+          <div id="setupAiFields">
+            <div class="form-grid">
+              <label class="field">
+                <span>Display name</span>
+                <input type="text" id="setupAiLabel" maxlength="60" placeholder="Claude" />
+              </label>
+              <label class="field">
+                <span>Model</span>
+                <input type="text" id="setupAiModel" list="setupAiModelList" spellcheck="false" autocomplete="off" />
+                <datalist id="setupAiModelList"></datalist>
+              </label>
+            </div>
+            <label class="field" id="setupAiUrlField">
+              <span>API URL</span>
+              <input type="url" id="setupAiUrl" spellcheck="false" autocomplete="off" />
+              <small id="setupAiUrlHint"></small>
+            </label>
+            <label class="field" id="setupAiClaudeField">
+              <span>Claude API key</span>
+              <input type="password" id="setupAiClaudeKey" autocomplete="new-password" spellcheck="false" />
+              <small id="setupAiClaudeHint">Saved on Living_Docs_Settings.</small>
+            </label>
+            <label class="field" id="setupAiCursorField" hidden>
+              <span>Cursor API key</span>
+              <input type="password" id="setupAiCursorKey" autocomplete="new-password" spellcheck="false" />
+              <small id="setupAiCursorHint">Saved on Living_Docs_Settings.</small>
+            </label>
+            <div class="row gap-8 ai-test-row">
+              <button class="btn btn-secondary btn-sm" id="btnSetupTestAi" type="button">Test connection</button>
+            </div>
+            <p class="small" id="setupAiTestResult" hidden></p>
           </div>
         </div>
+      </div>
 
-        <!-- Workflow Rules Table -->
-        <div class="metadata-table-wrapper" style="max-height:320px; overflow-y:auto;">
-          <table class="data-table" id="workflowTable">
+      <details class="setup-log" id="setupLogWrap" hidden>
+        <summary>Installation log</summary>
+        <div class="log" id="setupLog"></div>
+      </details>
+
+      <div class="setup-actions">
+        <button class="btn btn-ghost" id="btnSetupRetry">Check again</button>
+        <div class="row gap-8">
+          <button class="btn btn-ghost" id="btnSetupBack" type="button" hidden>Back</button>
+          <button class="btn btn-primary" id="btnSetupNext" type="button" hidden>Next</button>
+          <button class="btn btn-primary" id="btnSetupInstall" type="button" hidden>Submit</button>
+          <button class="btn btn-primary" id="btnSetupContinue" disabled>Continue</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MAIN FLOW ============ -->
+  <section class="screen" id="screenFlow">
+
+    <ol class="stepper" id="stepper">
+      <li data-step="1"><span class="num">1</span><span class="label">Overview</span></li>
+      <li data-step="2"><span class="num">2</span><span class="label">Select workflows</span></li>
+      <li data-step="3"><span class="num">3</span><span class="label">Review criteria &amp; code</span></li>
+      <li data-step="4"><span class="num">4</span><span class="label">Document</span></li>
+      <li data-step="5"><span class="num">5</span><span class="label">Save to CRM</span></li>
+    </ol>
+
+    <!-- STEP 1: OVERVIEW -->
+    <div class="step-panel" id="step1">
+      <div class="panel-head">
+        <div>
+          <h2>Your CRM at a glance</h2>
+          <p class="muted" id="scanStatus">Loading modules, workflow rules and functions…</p>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card" id="kpiModules">
+          <div class="kpi-top">
+            <span class="kpi-title">Modules</span>
+            <svg class="kpi-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2" opacity=".45"/></svg>
+          </div>
+          <div class="kpi-main"><span class="kpi-value">0</span><span class="kpi-delta"></span></div>
+          <div class="kpi-sub">Waiting for scan</div>
+        </div>
+        <div class="kpi-card" id="kpiWorkflows">
+          <div class="kpi-top">
+            <span class="kpi-title">Workflow rules</span>
+            <svg class="kpi-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M6 9v1a4 4 0 0 0 4 4h1v1h2v-1h1a4 4 0 0 0 4-4V9h-2v1a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2V9z"/></svg>
+          </div>
+          <div class="kpi-main"><span class="kpi-value">0</span><span class="kpi-delta"></span></div>
+          <div class="kpi-sub">Waiting for scan</div>
+        </div>
+        <div class="kpi-card" id="kpiFunctions">
+          <div class="kpi-top">
+            <span class="kpi-title">Custom functions</span>
+            <svg class="kpi-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          </div>
+          <div class="kpi-main"><span class="kpi-value">0</span><span class="kpi-delta"></span></div>
+          <div class="kpi-sub">Waiting for scan</div>
+        </div>
+        <div class="kpi-card" id="kpiActive">
+          <div class="kpi-top">
+            <span class="kpi-title">Active rules</span>
+            <svg class="kpi-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1.2 14.2-4-4 1.4-1.4 2.6 2.6 5.6-5.6 1.4 1.4z"/></svg>
+          </div>
+          <div class="kpi-main"><span class="kpi-value">0</span><span class="kpi-delta"></span></div>
+          <div class="kpi-sub">Waiting for scan</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Workflow rules by module</h3>
+          <span class="muted small">Click a module to see its rules</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Module</th><th class="num">Rules</th><th class="num">Active</th><th class="num">Calling a function</th><th>Last documented</th><th></th></tr></thead>
+            <tbody id="moduleTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="step-footer">
+        <span></span>
+        <button class="btn btn-primary" id="btnToSelect">Select workflows</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: SELECT -->
+    <div class="step-panel" id="step2">
+      <div class="panel-head">
+        <div>
+          <h2>Select workflows to document</h2>
+          <p class="muted">Pick one rule or several. They go into one document.</p>
+        </div>
+        <span class="pill pill-blue" id="selectedCountPill">0 selected</span>
+      </div>
+
+      <div class="card">
+        <div class="toolbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="wfSearch" placeholder="Search by name, criteria or action" />
+          </div>
+          <select id="wfModuleFilter"><option value="ALL">All modules</option></select>
+          <select id="wfStatusFilter">
+            <option value="ALL">Any status</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+          <label class="check-inline"><input type="checkbox" id="wfFunctionsOnly" /> Only rules that call a function</label>
+          <button class="btn btn-ghost btn-sm" id="btnClearSelection">Clear selection</button>
+        </div>
+        <div class="table-wrap tall">
+          <table class="table selectable">
             <thead>
               <tr>
-                <th style="width:40px; text-align:center;">
-                  <input type="checkbox" id="chkWorkflowHeaderAll" />
-                </th>
-                <th>Workflow Name</th>
+                <th class="col-check"><input type="checkbox" id="wfCheckAll" title="Select all visible" /></th>
+                <th>Workflow rule</th>
                 <th>Module</th>
-                <th>Trigger Event</th>
-                <th>Criteria</th>
-                <th>Configured Actions</th>
+                <th>Trigger</th>
+                <th>Actions</th>
                 <th>Status</th>
-                <th style="text-align:right; width:160px;">Actions</th>
+                <th></th>
               </tr>
             </thead>
-            <tbody id="workflowTableBody">
-              <!-- Dynamically populated via JS -->
-            </tbody>
+            <tbody id="wfTableBody"></tbody>
           </table>
         </div>
       </div>
 
-      <div class="d-flex justify-between align-center mt-4">
-        <span class="badge badge-gray" id="scanTimestampBadge">Last Scanned: Just now</span>
-        <button class="btn btn-primary" id="btnProceedToDoc">Proceed to Generate Documentation &rarr;</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 2: LIVING DOCS STUDIO -->
-  <div class="tab-pane" id="tab-docs">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8z"/></svg>
-            Living Documentation Studio
-          </h2>
-          <p>AI-generated Markdown specs, automation flowcharts, and WorkDrive export.</p>
-        </div>
-        <div class="d-flex gap-2">
-          <select class="form-control" id="selectDocType" style="width:220px;">
-            <option value="technical">Full Technical Spec</option>
-            <option value="workflow_spec">⚡ Selected Workflows Spec</option>
-            <option value="handover">Client Handover Pack</option>
-            <option value="user_guide">End-User Guide</option>
-            <option value="architecture">System Architecture</option>
-          </select>
-          <select class="form-control" id="selectAudience" style="width:170px;">
-            <option value="admin">Zoho Administrator</option>
-            <option value="client">Client / Executive</option>
-            <option value="developer">Developer / Auditor</option>
-          </select>
-          <button class="btn btn-primary" id="btnGenerateDocs">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            Generate with Claude
-          </button>
-        </div>
-      </div>
-
-      <!-- Documentation Action Bar -->
-      <div class="doc-action-bar">
-        <div class="d-flex align-center gap-2">
-          <span class="badge badge-blue" id="docVersionBadge">Baseline: snap_current</span>
-          <span class="badge badge-purple" id="docModelBadge">Model: Claude 3.5 Sonnet</span>
-        </div>
-        <div class="d-flex gap-2">
-          <button class="btn btn-secondary btn-sm" id="btnCopyMarkdown">📋 Copy Markdown</button>
-          <button class="btn btn-secondary btn-sm" id="btnDownloadMd">💾 Download .MD</button>
-          <button class="btn btn-secondary btn-sm" id="btnPrintPdf">🖨️ Print / PDF</button>
-          <button class="btn btn-success btn-sm" id="btnExportWorkDrive">☁️ Export to WorkDrive</button>
-        </div>
-      </div>
-
-      <!-- Rendered Document View -->
-      <div class="doc-rendered-content" id="docRenderedOutput">
-        <!-- Rendered markdown goes here -->
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 3: DRIFT DETECTION & VISUAL DIFF (KEY DIFFERENTIATOR) -->
-  <div class="tab-pane" id="tab-drift">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-            Documentation Drift Radar &amp; Impact Analysis
-          </h2>
-          <p>Compares live CRM metadata against baseline hashes to identify outdated documentation sections.</p>
-        </div>
-        <div class="d-flex gap-2">
-          <button class="btn btn-secondary" id="btnRunDriftCheck">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            Check Drift Now
-          </button>
-          <button class="btn btn-primary" id="btnTargetedRegenerate" disabled>
-            ⚡ Regenerate Affected Only
-          </button>
-        </div>
-      </div>
-
-      <!-- Drift Banner Alert -->
-      <div class="drift-banner-alert clean" id="driftBannerAlert">
-        <div class="drift-icon-circle" id="driftBannerIcon">✓</div>
-        <div>
-          <h3 style="font-size:15px; font-weight:700;" id="driftBannerTitle">All Documents Synchronized</h3>
-          <p style="font-size:13px; color:var(--text-muted); margin-top:2px;" id="driftBannerDesc">
-            All CRM fields, workflows, and blueprints match the baseline snapshot. Zero documentation drift detected.
-          </p>
-        </div>
-      </div>
-
-      <!-- Changed Components Breakdown -->
-      <div id="driftChangesSection" style="display:none;">
-        <div class="card-title-group mb-2">
-          <h3 style="font-size:14px; font-weight:700;">Detected Schema &amp; Automation Drift Events</h3>
-        </div>
-        <div class="metadata-table-wrapper mb-4">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Module</th>
-                <th>Change Type</th>
-                <th>Component ID</th>
-                <th>Delta Details</th>
-                <th>Impacted Document Sections</th>
-              </tr>
-            </thead>
-            <tbody id="driftChangesTableBody">
-              <!-- Populated via JS -->
-            </tbody>
-          </table>
-        </div>
-
-        <!-- Before / After Visual Diff Viewer -->
-        <div class="card-title-group mb-2">
-          <h3 style="font-size:14px; font-weight:700;">Side-by-Side Visual Diff Preview</h3>
-        </div>
-        <div class="diff-viewer-grid">
-          <div class="diff-box">
-            <div class="diff-header">
-              <span>Current Document Baseline</span>
-              <span class="badge badge-gray" id="diffBaselineTag">Snapshot Baseline</span>
-            </div>
-            <div class="diff-body" id="diffOldContent">
-              <!-- Old Markdown snippet -->
-            </div>
-          </div>
-          <div class="diff-box">
-            <div class="diff-header">
-              <span>Proposed Sync (Regenerated)</span>
-              <span class="badge badge-green">Ready to Approve</span>
-            </div>
-            <div class="diff-body" id="diffNewContent">
-              <!-- New Markdown snippet -->
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- TAB 6: SETTINGS & SIMULATION HUB -->
-  <div class="tab-pane" id="tab-settings">
-    <div class="card-panel">
-      <div class="card-header-bar">
-        <div class="card-title-group">
-          <h2>
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            Settings &amp; Connection Governance
-          </h2>
-          <p>Settings and configurations are stored in the Zoho CRM <code>Living_Docs_Settings</code> Custom Module. Zero hardcoded OAuth tokens.</p>
-        </div>
-        <div>
-          <button class="btn btn-secondary btn-sm" id="btnOpenSetupWizard">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Scope &amp; Connection Wizard
-          </button>
-        </div>
-      </div>
-
-      <!-- Custom Module Storage Status Banner -->
-      <div class="status-callout success" id="settingsStorageStatusBanner">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-        <div>
-          <strong>Storage Target:</strong> Configured to read and write records from custom module <code>Living_Docs_Settings</code> via Zoho Connections.
-        </div>
-      </div>
-
-      <!-- Connections Configuration Section -->
-      <div style="background:#f8fafc; border:1px solid var(--border-color); border-radius:10px; padding:16px; margin-bottom:20px;">
-        <h4 style="font-size:14px; font-weight:700; color:var(--text-main); margin-bottom:12px; display:flex; align-items:center; gap:8px;">
-          🔗 Zoho Named Connections (OAuth Tokenless Governance)
-        </h4>
-        <div class="stat-summary-grid" style="grid-template-columns: 1fr 1fr; margin-bottom:0;">
-          <div class="form-group" style="margin-bottom:0;">
-            <label>CRM &amp; Custom Modules Connection Link Name</label>
-            <input type="text" class="form-control" id="settingsDocsAgentConn" value="docsagent_connection" placeholder="docsagent_connection" />
-            <small style="color:var(--text-muted); font-size:11.5px;">Requires scopes: <code>ZohoCRM.modules.ALL</code>, <code>ZohoCRM.modules.All</code>, <code>ZohoCRM.org.READ</code>, <code>ZohoCRM.settings.ALL</code>, <code>ZohoCRM.settings.functions.ALL</code>, <code>ZohoCRM.settings.READ</code></small>
-          </div>
-          <div class="form-group" style="margin-bottom:0;">
-            <label>WorkDrive Connection Link Name</label>
-            <input type="text" class="form-control" id="settingsWorkDriveConn" value="workdrive_connection" placeholder="workdrive_connection" />
-            <small style="color:var(--text-muted); font-size:11.5px;">Requires scopes: <code>WorkDrive.files.ALL</code>, <code>WorkDrive.workspace.ALL</code></small>
-          </div>
-        </div>
-      </div>
-
-      <!-- Settings Form -->
-      <div class="stat-summary-grid" style="grid-template-columns: 1fr 1fr; margin-bottom:20px;">
-        <div>
-          <div class="form-group">
-            <label>Claude API Key (Anthropic)</label>
-            <input type="password" class="form-control" id="settingsClaudeKey" placeholder="sk-ant-api..." />
-            <small style="color:var(--text-muted); font-size:11.5px;">Client-owned key stored securely in custom module <code>Living_Docs_Settings</code>.</small>
-          </div>
-          <div class="form-group">
-            <label>AI Model</label>
-            <select class="form-control" id="settingsClaudeModel">
-              <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022 (Recommended)</option>
-              <option value="claude-3-haiku-20240307">claude-3-haiku-20240307 (Fast / High throughput)</option>
-              <option value="claude-3-opus-20240229">claude-3-opus-20240229 (Complex Enterprise)</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <div class="form-group">
-            <label>WorkDrive Default Folder ID</label>
-            <input type="text" class="form-control" id="settingsWorkDriveFolder" value="folder_living_docs_crm" />
-          </div>
-          <div class="form-group">
-            <label>Scheduled Drift Check Frequency</label>
-            <select class="form-control" id="settingsScheduleFreq">
-              <option value="daily">Daily (Nightly at 02:00 AM)</option>
-              <option value="weekly">Weekly (Sunday at 00:00 AM)</option>
-              <option value="on_demand">On-Demand Only</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="d-flex gap-2 mb-4">
-        <button class="btn btn-primary" id="btnSaveSettings">
-          💾 Save Settings to Custom Module
-        </button>
-        <button class="btn btn-secondary" id="btnVerifyModulesNow">
-          ⚡ Verify &amp; Re-provision Custom Modules
-        </button>
-        <button class="btn btn-secondary" id="btnOpenSetupWizard">
-          🔗 Connection Setup Wizard
-        </button>
-      </div>
-
-      <!-- Live Demo Simulation Hub for 8-Minute Challenge Demo -->
-      <div style="border-top: 1px solid var(--border-color); padding-top: 20px;">
-        <div class="card-title-group mb-2">
-          <h3 style="font-size:15px; font-weight:700; color:var(--primary);">
-            🧪 Live Demo Simulation Hub (8-Minute Presentation Plan)
-          </h3>
-          <p style="font-size:12.5px; color:var(--text-muted);">
-            Simulate instant CRM configuration changes to demonstrate real-time Drift Detection, Impact Analysis, and Targeted 1-Click Sync.
-          </p>
-        </div>
-
-        <div class="scenario-card-grid">
-          <div class="scenario-card">
-            <div>
-              <h4>Scenario 1: Add Lead VIP Field</h4>
-              <p>Simulates an Admin adding a new custom picklist field <code>VIP_Customer_Tier</code> to the Leads module.</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="btnSimFieldChange">Simulate Field Addition</button>
-          </div>
-
-          <div class="scenario-card">
-            <div>
-              <h4>Scenario 2: Modify Deal Workflow</h4>
-              <p>Simulates an Admin modifying the threshold and actions on the High-Value Deal automation rule.</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="btnSimWorkflowChange">Simulate Workflow Edit</button>
-          </div>
-
-          <div class="scenario-card">
-            <div>
-              <h4>Scenario 3: Update Deal Blueprint</h4>
-              <p>Simulates adding a new fast-track state transition rule into the Enterprise Sales Blueprint.</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="btnSimBlueprintChange">Simulate Blueprint Edit</button>
-          </div>
-
-          <div class="scenario-card">
-            <div>
-              <h4>Reset Demo Baseline</h4>
-              <p>Restores the CRM configuration back to the initial pristine baseline state.</p>
-            </div>
-            <button class="btn btn-warning btn-sm" id="btnSimReset">Reset Baseline</button>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-</div><!-- /#mainAppView -->
-
-<!-- =========================================================
-     NORMAL WIZARD INSTALLATION PAGE
-     ========================================================= -->
-<div class="onboarding-page-view" id="onboardingPageView" style="display:none;">
-  <div class="onboarding-page-container">
-
-    <!-- WIZARD HEADER CARD -->
-    <div class="onboarding-header-card">
-      <div class="onboarding-header-top">
-        <div class="onboarding-title-group">
-          <h1>
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            Living Documentation Agent — Installation Wizard
-          </h1>
-          <p>Zero-Deluge Setup · Configure Zoho CRM Named Connections and auto-provision required custom modules.</p>
-        </div>
-        <button class="btn btn-secondary btn-sm" id="btnOnboardingBackToApp" style="display:none;">
-          ← Back to Studio
-        </button>
-      </div>
-
-      <div class="wizard-steps-progress">
-        <div class="wiz-prog-step active" id="wizProg1"><span class="wiz-prog-num">1</span><span>Step 1: Connections &amp; Scopes</span></div>
-        <span class="wiz-prog-arrow">›</span>
-        <div class="wiz-prog-step" id="wizProg2"><span class="wiz-prog-num">2</span><span>Step 2: Verification</span></div>
-        <span class="wiz-prog-arrow">›</span>
-        <div class="wiz-prog-step" id="wizProg3"><span class="wiz-prog-num">3</span><span>Step 3: Installation &amp; Finish</span></div>
+      <div class="step-footer">
+        <button class="btn btn-ghost" data-goto="1">Back</button>
+        <button class="btn btn-primary" id="btnToReview" disabled>Review selected</button>
       </div>
     </div>
 
-    <!-- MAIN STEP CONTAINER CARD -->
-    <div class="onboarding-body-card">
+    <!-- STEP 3: REVIEW -->
+    <div class="step-panel" id="step3">
+      <div class="panel-head">
+        <div>
+          <h2>Review criteria and code</h2>
+          <p class="muted" id="reviewStatus">Loading rule details and function code…</p>
+        </div>
+        <div class="row gap-8">
+          <button class="btn btn-secondary btn-sm" id="btnReviewDetails" type="button">Details</button>
+        </div>
+      </div>
 
-      <!-- STEP 1: Setup Guide & Link Name Form -->
-      <div class="wiz-step-content active" id="wizStep1">
-        <div class="status-callout info">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      <div class="review-tabs" id="reviewTabs"></div>
+      <div id="reviewBody"></div>
+
+      <details class="card prompt-card" id="promptCard">
+        <summary>
           <div>
-            <strong>Step 1:</strong> Go to <em>Zoho CRM &gt; Setup &gt; Developer Space &gt; Connections &gt; Add Connection</em>. Create both connections below with the exact scopes.
+            <h3>Prompt</h3>
+            <span class="muted small" id="promptStats">Built from the rule and its function code</span>
+          </div>
+          <span class="summary-hint">Show and edit</span>
+        </summary>
+        <div class="prompt-body">
+          <label class="field">
+            <span>Instructions</span>
+            <textarea id="promptSystem" rows="7" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <span>Rule, criteria and code</span>
+            <textarea id="promptUser" rows="20" spellcheck="false"></textarea>
+          </label>
+          <div class="row gap-8 end">
+            <button class="btn btn-ghost btn-sm" id="btnRebuildPrompt">Reset prompt</button>
+            <button class="btn btn-secondary btn-sm" id="btnCopyPrompt">Copy prompt</button>
           </div>
         </div>
+      </details>
 
-        <div class="wizard-step-box">
-          <div class="wizard-step-title"><span class="wizard-step-badge">1</span> Required Connections &amp; Scopes Reference</div>
-          <div class="scope-grid">
-            <div class="scope-card">
-              <div class="scope-card-header">
-                <h5>1. docsagent_connection</h5>
-                <span class="scope-pill-tag">Zoho OAuth (CRM)</span>
-              </div>
-              <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Used to auto-provision custom modules via v8 API, read metadata, and store living documentation.</p>
-              <ul class="scope-list">
-                <li>ZohoCRM.settings.workflow_rules.ALL</li>
-                <li>ZohoCRM.settings.workflow_rules.READ</li>
-                <li>ZohoCRM.modules.ALL</li>
-                <li>ZohoCRM.settings.fields.READ</li>
-                <li>ZohoCRM.settings.modules.READ</li>
-                <li>ZohoCRM.settings.ALL</li>
-                <li>ZohoCRM.org.READ</li>
-              </ul>
-            </div>
-            <div class="scope-card">
-              <div class="scope-card-header">
-                <h5>2. workdrive_connection</h5>
-                <span class="scope-pill-tag">Zoho WorkDrive</span>
-              </div>
-              <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Used to export living documentation PDF &amp; Markdown specs directly into WorkDrive folders.</p>
-              <ul class="scope-list">
-                <li>WorkDrive.files.ALL</li>
-                <li>WorkDrive.workspace.ALL</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <div class="wizard-step-box">
-          <div class="wizard-step-title"><span class="wizard-step-badge">2</span> Connection Link Names &amp; Parameters</div>
-          <div class="stat-summary-grid" style="grid-template-columns:1fr 1fr;margin-bottom:12px;">
-            <div class="form-group" style="margin-bottom:0;">
-              <label>CRM Connection Link Name</label>
-              <input type="text" class="form-control" id="wizConnDocsAgent" value="docsagent_connection" />
-              <small style="color:var(--text-muted);font-size:11px;">Must match Link Name in Zoho CRM Connections</small>
-            </div>
-            <div class="form-group" style="margin-bottom:0;">
-              <label>WorkDrive Connection Link Name</label>
-              <input type="text" class="form-control" id="wizConnWorkDrive" value="workdrive_connection" />
-              <small style="color:var(--text-muted);font-size:11px;">Must match Link Name in Zoho CRM Connections</small>
-            </div>
-          </div>
-          <div class="stat-summary-grid" style="grid-template-columns:1fr 1fr;margin-bottom:0;">
-            <div class="form-group" style="margin-bottom:0;">
-              <label>Claude API Key (Anthropic) - Optional</label>
-              <input type="password" class="form-control" id="wizClaudeKey" placeholder="sk-ant-api..." />
-              <small style="color:var(--text-muted);font-size:11px;">Stored securely in custom module <code>Living_Docs_Settings</code></small>
-            </div>
-            <div class="form-group" style="margin-bottom:0;">
-              <label>WorkDrive Default Folder ID</label>
-              <input type="text" class="form-control" id="wizWorkDriveFolder" value="folder_living_docs_crm" />
-            </div>
-          </div>
-        </div>
-
-        <div class="wizard-footer-actions">
-          <button class="btn btn-secondary" id="btnWizSkipToApp">Skip / Open Standalone Mode</button>
-          <button class="btn btn-primary" id="btnWizGoToVerify">
-            Next: Verify Connections &rarr;
-          </button>
-        </div>
-      </div><!-- /wizStep1 -->
-
-
-      <!-- STEP 2: Verification -->
-      <div class="wiz-step-content" id="wizStep2">
-        <div class="status-callout info" id="wizVerifyCallout">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-          <div id="wizVerifyCalloutText">Checking Zoho Named Connections...</div>
-        </div>
-
-        <div class="verify-conn-item" id="verifyItemDocsAgent">
-          <div class="verify-conn-icon" id="verifyIconDocsAgent">⏳</div>
-          <div class="verify-conn-body">
-            <div class="verify-conn-name" id="verifyNameDocsAgent">docsagent_connection</div>
-            <div class="verify-conn-status" id="verifyStatusDocsAgent">Checking Zoho CRM API access...</div>
-          </div>
-        </div>
-
-        <div class="verify-conn-item" id="verifyItemWorkDrive">
-          <div class="verify-conn-icon" id="verifyIconWorkDrive">⏳</div>
-          <div class="verify-conn-body">
-            <div class="verify-conn-name" id="verifyNameWorkDrive">workdrive_connection</div>
-            <div class="verify-conn-status" id="verifyStatusWorkDrive">Checking WorkDrive connection...</div>
-          </div>
-        </div>
-
-        <div id="wizVerifyError" style="display:none;margin-top:14px;">
-          <div class="status-callout warning">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <div id="wizVerifyErrorText">One or more connections could not be verified. Please verify that the connections exist in Zoho CRM.</div>
-          </div>
-        </div>
-
-        <div class="wizard-footer-actions">
-          <button class="btn btn-secondary" id="btnWizBackToStep1">&larr; Back</button>
-          <div class="d-flex gap-2">
-            <button class="btn btn-secondary" id="btnWizRetryVerify">Re-verify</button>
-            <button class="btn btn-primary" id="btnWizProceedToProvision">
-              Next: Install Custom Modules &rarr;
-            </button>
-          </div>
-        </div>
-      </div><!-- /wizStep2 -->
-
-
-      <!-- STEP 3: Provision Modules & Custom Fields -->
-      <div class="wiz-step-content" id="wizStep3">
-        <div class="status-callout info" id="wizProvisionCallout">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <div>Installing required Custom Modules and Fields into Zoho CRM...</div>
-        </div>
-
-        <div class="module-provision-grid">
-          <div class="module-provision-card" id="modCardSettings">
-            <div class="mod-name">📦 Living_Docs_Settings</div>
-            <div class="mod-status" id="modStatusSettings">⏳ Checking &amp; Creating Fields...</div>
-          </div>
-          <div class="module-provision-card" id="modCardSnapshots">
-            <div class="mod-name">📦 Living_Docs_Snapshots</div>
-            <div class="mod-status" id="modStatusSnapshots">⏳ Checking &amp; Creating Fields...</div>
-          </div>
-        </div>
-
-        <div class="provision-log-console" id="wizProvisionLog" style="margin-top:14px;"></div>
-
-        <div id="wizStep3DoneRow" style="display:none;margin-top:16px;">
-          <div class="status-callout success" style="margin-bottom:14px;">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            <div><strong>Installation Complete!</strong> Custom modules and fields are provisioned. Connection configuration saved.</div>
-          </div>
-          <div style="text-align:right;">
-            <button class="btn btn-primary" id="btnWizEnterApp" style="padding:10px 24px; font-weight:700;">
-              Finish &amp; Open Studio &rarr;
-            </button>
-          </div>
-        </div>
-      </div><!-- /wizStep3 -->
-
-    </div><!-- /.onboarding-body-card -->
-  </div><!-- /.onboarding-page-container -->
-</div><!-- /#onboardingPageView -->
-
-  <!-- WORKFLOW DETAIL MODAL (Zoho CRM API v8 GET /settings/automation/workflow_rules/{id}) -->
-  <div id="workflowDetailModal" class="wf-modal-overlay" style="display:none;">
-    <div class="wf-modal-container">
-      <div class="wf-modal-header">
-        <div class="wf-modal-title-box">
-          <div class="d-flex align-center gap-2 flex-wrap">
-            <span class="badge badge-purple" style="font-family:monospace; font-size:11px;">GET /crm/v8/settings/automation/workflow_rules/{id}</span>
-            <span class="badge badge-green" style="font-size:11px;">Scope: ZohoCRM.settings.workflow_rules.ALL / READ</span>
-          </div>
-          <h3 id="modalWorkflowName" style="margin:6px 0 2px 0;">Workflow Rule</h3>
-          <p id="modalWorkflowId" style="font-size:11.5px; color:var(--text-muted); font-family:monospace; margin:0;"></p>
-        </div>
-        <button class="wf-modal-close" id="btnCloseWorkflowModal" title="Close">&times;</button>
-      </div>
-      
-      <div class="wf-modal-body">
-        <div class="wf-modal-tabs">
-          <button class="wf-modal-tab-btn active" data-modaltab="overview">Overview &amp; Triggers</button>
-          <button class="wf-modal-tab-btn" data-modaltab="conditions">Conditions &amp; Actions</button>
-          <button class="wf-modal-tab-btn" data-modaltab="json">Raw API v8 JSON</button>
-        </div>
-
-        <!-- Tab 1: Overview -->
-        <div class="wf-modal-content active" id="modalTabOverview">
-          <div class="wf-detail-grid">
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Associated Module</div>
-              <div class="wf-detail-val" id="modalWfModule">-</div>
-            </div>
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Workflow Status</div>
-              <div class="wf-detail-val" id="modalWfStatus">-</div>
-            </div>
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Trigger Event Type</div>
-              <div class="wf-detail-val" id="modalWfTrigger">-</div>
-            </div>
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Source System</div>
-              <div class="wf-detail-val" id="modalWfSource">-</div>
-            </div>
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Created Time &amp; By</div>
-              <div class="wf-detail-val" id="modalWfCreated">-</div>
-            </div>
-            <div class="wf-detail-card">
-              <div class="wf-detail-label">Modified Time &amp; By</div>
-              <div class="wf-detail-val" id="modalWfModified">-</div>
-            </div>
-          </div>
-          <div class="wf-detail-card" style="margin-bottom:12px;">
-            <div class="wf-detail-label">Rule Description</div>
-            <div style="font-size:12.5px; color:var(--text-main); margin-top:2px;" id="modalWfDesc">-</div>
-          </div>
-          <div class="wf-detail-card">
-            <div class="wf-detail-label">Execution Criteria</div>
-            <div style="font-size:12.5px; font-family:monospace; background:#ffffff; border:1px solid var(--border-color); padding:8px 10px; border-radius:6px; margin-top:4px;" id="modalWfCriteria">-</div>
-          </div>
-        </div>
-
-        <!-- Tab 2: Conditions & Actions -->
-        <div class="wf-modal-content" id="modalTabConditions">
-          <div id="modalConditionsContainer"></div>
-        </div>
-
-        <!-- Tab 3: Raw JSON -->
-        <div class="wf-modal-content" id="modalTabJson">
-          <div class="d-flex justify-between align-center mb-2">
-            <span style="font-size:12px; color:var(--text-muted);">Exact response from <code>GET /crm/v8/settings/automation/workflow_rules/{id}</code> via <code>ZohoCRM.settings.workflow_rules.ALL</code> / <code>READ</code></span>
-            <button class="btn btn-secondary btn-sm" id="btnCopyModalJson">📋 Copy JSON</button>
-          </div>
-          <pre class="wf-modal-code" id="modalRawJson"></pre>
-        </div>
-      </div>
-
-      <div class="wf-modal-footer">
-        <button class="btn btn-secondary btn-sm" id="btnFooterCloseWorkflowModal">Close</button>
-        <button class="btn btn-primary btn-sm" id="btnModalDocWorkflow" style="background:var(--accent-gradient); border:none; font-weight:700;">
-          ✨ Generate AI Documentation for this Rule &rarr;
-        </button>
+      <div class="step-footer">
+        <button class="btn btn-ghost" data-goto="2">Back</button>
+        <button class="btn btn-primary" id="btnGenerate" disabled>Generate documentation</button>
       </div>
     </div>
-  </div>
 
-<!-- Zoho Embedded SDK -->
+    <!-- STEP 4: DOCUMENT -->
+    <div class="step-panel" id="step4">
+      <div class="panel-head">
+        <div>
+          <h2>Documentation</h2>
+          <p class="muted" id="docStatus">Writing the document…</p>
+        </div>
+        <div class="row gap-8">
+          <button class="btn btn-ghost btn-sm" id="btnViewDetails" type="button">Details</button>
+          <button class="btn btn-primary btn-sm" id="btnViewDocument" type="button">Document</button>
+          <button class="btn btn-ghost btn-sm" id="btnCopyMd" disabled>Copy text</button>
+          <button class="btn btn-ghost btn-sm" id="btnDownloadMd" disabled>Download .md</button>
+          <button class="btn btn-secondary btn-sm" id="btnDownloadPdf" disabled>Download PDF</button>
+        </div>
+      </div>
+
+      <div class="notice warning" id="docNotice" hidden></div>
+      <article class="card doc-view" id="docView"></article>
+
+      <div class="step-footer">
+        <button class="btn btn-ghost" data-goto="3">Back to review</button>
+        <button class="btn btn-primary" id="btnToSave" disabled>Save to CRM</button>
+      </div>
+    </div>
+
+    <!-- STEP 5: SAVE -->
+    <div class="step-panel" id="step5">
+      <div class="save-card card" id="saveCard"></div>
+      <div class="step-footer">
+        <button class="btn btn-ghost" data-goto="4">Back to document</button>
+        <button class="btn btn-primary" id="btnStartOver">Document other workflows</button>
+      </div>
+    </div>
+
+  </section>
+</div>
+
+<!-- Settings drawer -->
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+<aside class="drawer" id="settingsDrawer" aria-hidden="true">
+  <div class="drawer-head">
+    <h3>Settings</h3>
+    <button class="btn btn-icon" id="btnCloseSettings" title="Close">
+      <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+    <div class="section-label">Zoho connections</div>
+    <label class="field"><span>CRM connection link name</span><input type="text" id="settingsDocsConn" /></label>
+    <label class="field" hidden><span>WorkDrive connection link name</span><input type="text" id="settingsWdConn" /></label>
+    <label class="field" hidden><span>WorkDrive folder ID</span><input type="text" id="settingsWorkDriveFolder" /></label>
+    <p class="muted small">Applying code changes needs the standalone function <code>livingdocs_update_function</code>. <button class="link-btn" id="btnShowUpdateHelper" type="button">Show setup steps</button></p>
+
+    <div class="section-label">AI provider</div>
+    <label class="field">
+      <span>Provider</span>
+      <select id="settingsAiProvider">
+        <option value="">Not set up (improve and documentation are disabled)</option>
+        <option value="anthropic">Claude (Anthropic API)</option>
+        <option value="cursor">Cursor (Cloud Agents API)</option>
+      </select>
+    </label>
+    <div id="settingsAiFields">
+      <label class="field">
+        <span>Display name</span>
+        <input type="text" id="settingsAiLabel" maxlength="60" placeholder="Claude" />
+        <small>Shown in the documentation log as "Generated by".</small>
+      </label>
+      <label class="field">
+        <span>API URL</span>
+        <input type="url" id="settingsAiUrl" spellcheck="false" autocomplete="off" />
+        <small id="settingsAiUrlHint"></small>
+      </label>
+      <label class="field">
+        <span>Model</span>
+        <input type="text" id="settingsAiModel" list="settingsAiModelList" spellcheck="false" autocomplete="off" />
+        <datalist id="settingsAiModelList"></datalist>
+      </label>
+      <label class="field">
+        <span>API key</span>
+        <input type="password" id="settingsAiKey" autocomplete="new-password" spellcheck="false" />
+        <small id="settingsAiKeyHint">Saved on the Living_Docs_Settings record. It is not shown again after you save.</small>
+      </label>
+      <div class="row gap-8 ai-test-row">
+        <button class="btn btn-secondary btn-sm" id="btnTestAi" type="button">Test connection</button>
+        <button class="link-btn" id="btnClearAiKey" type="button" hidden>Remove saved key</button>
+      </div>
+      <p class="small" id="settingsAiTestResult" hidden></p>
+    </div>
+    <p class="muted small">Only masked rules, criteria and code are sent. Record, workflow and org IDs, tokens and credentials are replaced with placeholders in your browser, and the prompt is checked once more just before it is sent.</p>
+
+    <div class="section-label">Documentation</div>
+    <label class="field">
+      <span>Audience</span>
+      <select id="settingsAudience">
+        <option value="admin">CRM administrator</option>
+        <option value="developer">Developer</option>
+        <option value="client">Business owner</option>
+      </select>
+    </label>
+    <p class="muted small" id="settingsRecordNote"></p>
+  </div>
+  <div class="drawer-foot">
+    <button class="btn btn-ghost" id="btnSettingsRecheck">Run setup check</button>
+    <button class="btn btn-primary" id="btnSaveSettings">Save</button>
+  </div>
+</aside>
+
+<div class="modal-backdrop" id="ruleDocBackdrop" hidden>
+  <div class="modal rule-doc-modal" role="dialog" aria-modal="true" aria-labelledby="ruleDocTitle">
+    <div class="modal-head rule-doc-head">
+      <h3 id="ruleDocTitle">Workflow rule</h3>
+      <button class="btn btn-ghost btn-sm" id="btnCloseRuleDoc" type="button">Close</button>
+    </div>
+    <div class="modal-body" id="ruleDocBody"></div>
+  </div>
+</div>
+
+<!-- Confirm dialog -->
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head"><h3 id="modalTitle"></h3></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" id="modalCancel">Cancel</button>
+      <button class="btn btn-primary" id="modalConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="issue-tip" id="issueTip" role="tooltip" hidden></div>
+<button class="btn btn-sm mask-sel-btn" id="maskSelBtn" hidden>Mask as secret</button>
+
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
 
 <script src="https://live.zwidgets.com/js-sdk/1.2/ZohoEmbededAppSDK.min.js"></script>
+<script src="js/vendor/html2pdf.bundle.min.js"></script>
+<script src="js/deluge-review.js"></script>
+<script src="js/ai-client.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

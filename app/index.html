@@ -5,12 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Zoho Living Documentation Agent</title>
   <link rel="stylesheet" href="css/style.css" />
-  <!-- CDN dependencies for rich rendering: Marked, Mermaid -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
-  </script>
 </head>
 <body>
 
@@ -90,43 +84,48 @@
           </button>
         </div>
       </div>
+      <p class="scan-live-status" id="scanLiveStatus">KPIs load from Zoho CRM API v8 after you scan. Nothing here is sample data.</p>
 
       <!-- Metric Stats -->
       <div class="stat-summary-grid">
         <div class="stat-box">
           <div class="stat-icon">📦</div>
           <div class="stat-info">
-            <div class="stat-val" id="statModulesCount">4</div>
+            <div class="stat-val" id="statModulesCount">0</div>
             <div class="stat-title">CRM Modules</div>
+            <div class="stat-sub" id="statModulesSub">Waiting for CRM API</div>
           </div>
         </div>
         <div class="stat-box">
           <div class="stat-icon">🏷️</div>
           <div class="stat-info">
-            <div class="stat-val" id="statFieldsCount">29</div>
+            <div class="stat-val" id="statFieldsCount">0</div>
             <div class="stat-title">Configured Fields</div>
+            <div class="stat-sub" id="statFieldsSub">Waiting for CRM API</div>
           </div>
         </div>
         <div class="stat-box">
           <div class="stat-icon">⚡</div>
           <div class="stat-info">
-            <div class="stat-val" id="statWorkflowsCount">5</div>
+            <div class="stat-val" id="statWorkflowsCount">0</div>
             <div class="stat-title">Total Workflows</div>
-            <div class="stat-sub" id="statWorkflowsSub" style="font-size:11px; color:var(--text-muted); margin-top:2px;">Scope: v8 ALL / READ</div>
+            <div class="stat-sub" id="statWorkflowsSub">GET /settings/automation/workflow_rules</div>
           </div>
         </div>
         <div class="stat-box">
           <div class="stat-icon">🗺️</div>
           <div class="stat-info">
-            <div class="stat-val" id="statBlueprintsCount">2</div>
+            <div class="stat-val" id="statBlueprintsCount">0</div>
             <div class="stat-title">Stage Blueprints</div>
+            <div class="stat-sub" id="statBlueprintsSub">Waiting for CRM API</div>
           </div>
         </div>
         <div class="stat-box">
           <div class="stat-icon">⚙️</div>
           <div class="stat-info">
-            <div class="stat-val" id="statFunctionsCount">2</div>
+            <div class="stat-val" id="statFunctionsCount">0</div>
             <div class="stat-title">Deluge Functions</div>
+            <div class="stat-sub" id="statFunctionsSub">Waiting for CRM API</div>
           </div>
         </div>
       </div>
@@ -163,7 +162,7 @@
               CRM Workflow Rules (API v8) &amp; AI Documentation Selector
             </h3>
             <p style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">
-              Retrieved via <code>GET /crm/v8/settings/automation/workflow_rules</code> using OAuth Scope: <code>ZohoCRM.settings.workflow_rules.ALL</code> / <code>ZohoCRM.settings.workflow_rules.READ</code>. Select workflows to view API specs or generate AI documentation.
+              Retrieved via <code>GET /crm/v8/settings/automation/workflow_rules</code>. Documentation also downloads each rule's function source with <code>GET /crm/v8/settings/functions/{id}/code</code> (scope <code>ZohoCRM.settings.functions.READ</code>). Select workflows, then generate.
             </p>
           </div>
           <div class="d-flex align-center gap-2">
@@ -176,12 +175,8 @@
         <div class="d-flex justify-between align-center gap-3 mb-3 flex-wrap">
           <div class="d-flex align-center gap-2 flex-wrap">
             <input type="text" class="form-control" id="searchWorkflowInput" placeholder="🔍 Search workflows (name, criteria, actions)..." style="width:220px; padding:6px 10px; font-size:13px;" />
-            <select class="form-control" id="filterWorkflowModule" style="width:140px; padding:6px 10px; font-size:13px;">
+            <select class="form-control" id="filterWorkflowModule" style="width:160px; padding:6px 10px; font-size:13px;">
               <option value="ALL">All Modules</option>
-              <option value="Leads">Leads</option>
-              <option value="Deals">Deals</option>
-              <option value="Accounts">Accounts</option>
-              <option value="Contacts">Contacts</option>
             </select>
             <select class="form-control" id="filterWorkflowStatus" style="width:130px; padding:6px 10px; font-size:13px;">
               <option value="ALL">All Status</option>
@@ -200,7 +195,7 @@
         </div>
 
         <!-- Workflow Rules Table -->
-        <div class="metadata-table-wrapper" style="max-height:320px; overflow-y:auto;">
+        <div class="metadata-table-wrapper workflow-table-scroll">
           <table class="data-table" id="workflowTable">
             <thead>
               <tr>
@@ -277,7 +272,10 @@
 
       <!-- Rendered Document View -->
       <div class="doc-rendered-content" id="docRenderedOutput">
-        <!-- Rendered markdown goes here -->
+        <div class="empty-state">
+          <h3>No document yet</h3>
+          <p>Select one workflow or several, then generate. The write-up uses those live Zoho CRM rules and your Claude API key.</p>
+        </div>
       </div>
     </div>
   </div>
@@ -388,7 +386,8 @@
       <div class="status-callout success" id="settingsStorageStatusBanner">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         <div>
-          <strong>Storage Target:</strong> Configured to read and write records from custom module <code>Living_Docs_Settings</code> via Zoho Connections.
+          <strong id="settingsRecordMode">Settings record:</strong>
+          <span id="settingsRecordDetail">The first save creates one Living_Docs_Settings row. Every later save updates that same row.</span>
         </div>
       </div>
 
@@ -401,7 +400,7 @@
           <div class="form-group" style="margin-bottom:0;">
             <label>CRM &amp; Custom Modules Connection Link Name</label>
             <input type="text" class="form-control" id="settingsDocsAgentConn" value="docsagent_connection" placeholder="docsagent_connection" />
-            <small style="color:var(--text-muted); font-size:11.5px;">Requires scopes: <code>ZohoCRM.modules.ALL</code>, <code>ZohoCRM.modules.All</code>, <code>ZohoCRM.org.READ</code>, <code>ZohoCRM.settings.ALL</code>, <code>ZohoCRM.settings.functions.ALL</code>, <code>ZohoCRM.settings.READ</code></small>
+            <small style="color:var(--text-muted); font-size:11.5px;">Modules API scope on this connection: <code>ZohoCRM.settings.modules.READ</code> or <code>ZohoCRM.settings.modules.ALL</code> (also <code>ZohoCRM.settings.ALL</code>). Used for <code>GET /crm/v8/settings/modules</code>.</small>
           </div>
           <div class="form-group" style="margin-bottom:0;">
             <label>WorkDrive Connection Link Name</label>
@@ -447,13 +446,13 @@
 
       <div class="d-flex gap-2 mb-4">
         <button class="btn btn-primary" id="btnSaveSettings">
-          💾 Save Settings to Custom Module
+          Save Settings
         </button>
         <button class="btn btn-secondary" id="btnVerifyModulesNow">
           ⚡ Verify &amp; Re-provision Custom Modules
         </button>
-        <button class="btn btn-secondary" id="btnOpenSetupWizard">
-          🔗 Connection Setup Wizard
+        <button class="btn btn-secondary" id="btnOpenSetupWizardInline">
+          Connection Setup Wizard
         </button>
       </div>
 
@@ -464,7 +463,7 @@
             🧪 Live Demo Simulation Hub (8-Minute Presentation Plan)
           </h3>
           <p style="font-size:12.5px; color:var(--text-muted);">
-            Simulate instant CRM configuration changes to demonstrate real-time Drift Detection, Impact Analysis, and Targeted 1-Click Sync.
+            Drift compares two live CRM scans. Change a workflow in Zoho CRM, run Scan CRM again, then check drift.
           </p>
         </div>
 
@@ -560,11 +559,13 @@
               </div>
               <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Used to auto-provision custom modules via v8 API, read metadata, and store living documentation.</p>
               <ul class="scope-list">
+                <li>ZohoCRM.settings.functions.READ</li>
                 <li>ZohoCRM.settings.workflow_rules.ALL</li>
                 <li>ZohoCRM.settings.workflow_rules.READ</li>
                 <li>ZohoCRM.modules.ALL</li>
                 <li>ZohoCRM.settings.fields.READ</li>
                 <li>ZohoCRM.settings.modules.READ</li>
+                <li>ZohoCRM.settings.modules.ALL</li>
                 <li>ZohoCRM.settings.ALL</li>
                 <li>ZohoCRM.org.READ</li>
               </ul>
@@ -781,6 +782,8 @@
       </div>
     </div>
   </div>
+
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
 
 <!-- Zoho Embedded SDK -->
 

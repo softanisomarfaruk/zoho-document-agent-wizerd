@@ -21,6 +21,7 @@
     driftReport: null,
     modulesProvisioned: false,
     connectionsConfirmed: false,
+    settingsRecordId: null,
     settings: {
       claudeModel: 'claude-3-5-sonnet-20241022',
       workdriveFolder: 'folder_living_docs_crm',
@@ -293,6 +294,10 @@
     dom.btnVerifyModulesNow.addEventListener('click', () => autoProvisionCustomModules(true));
     if (dom.btnOpenSetupWizard) {
       dom.btnOpenSetupWizard.addEventListener('click', () => showOnboardingView(true));
+    }
+    const btnOpenSetupInline = document.getElementById('btnOpenSetupWizardInline');
+    if (btnOpenSetupInline) {
+      btnOpenSetupInline.addEventListener('click', () => showOnboardingView(true));
     }
 
     // 3-Step Full-Page Onboarding Navigation
@@ -582,18 +587,33 @@
         const resp = await ZOHO.CRM.API.getAllRecords({
           Entity: 'Living_Docs_Settings',
           sort_order: 'desc',
-          per_page: 1
+          per_page: 200
         });
         if (resp && resp.data && resp.data.length > 0) {
-          const cfg = resp.data[0];
-          if (cfg.Docs_Agent_Connection && cfg.Workdrive_Connection) {
-            state.settings.docsAgentConnection = cfg.Docs_Agent_Connection;
-            state.settings.workdriveConnection = cfg.Workdrive_Connection;
+          const named = resp.data.filter(r => r.Name === 'agent_config_v1');
+          const pool = named.length ? named : resp.data;
+          pool.sort((a, b) => new Date(b.Modified_Time || b.Created_Time || 0) - new Date(a.Modified_Time || a.Created_Time || 0));
+          const cfg = pool[0];
+          if (cfg && (cfg.Docs_Agent_Connection || cfg.Workdrive_Connection || cfg.id)) {
+            state.settingsRecordId = cfg.id || null;
+            state.settings.docsAgentConnection = cfg.Docs_Agent_Connection || state.settings.docsAgentConnection;
+            state.settings.workdriveConnection = cfg.Workdrive_Connection || state.settings.workdriveConnection;
             state.settings.claudeModel = cfg.Claude_Model || state.settings.claudeModel;
             state.settings.workdriveFolder = cfg.Workdrive_Folder_Id || state.settings.workdriveFolder;
-            state.connectionsConfirmed = true;
-            console.log('[Setup] Connections loaded from Living_Docs_Settings module.');
-            return true;
+            if (cfg.Claude_API_Key) state.settings.claudeApiKey = cfg.Claude_API_Key;
+            if (cfg.Schedule_Frequency) state.settings.scheduleFrequency = cfg.Schedule_Frequency;
+            state.connectionsConfirmed = !!(cfg.Docs_Agent_Connection && cfg.Workdrive_Connection);
+            state.duplicateSettingsCount = named.length;
+            renderSettingsRecordStatus();
+            const freqEl = document.getElementById('settingsScheduleFreq');
+            if (freqEl && state.settings.scheduleFrequency) freqEl.value = state.settings.scheduleFrequency;
+            if (dom.settingsClaudeKey && cfg.Claude_API_Key) {
+              dom.settingsClaudeKey.value = '';
+              dom.settingsClaudeKey.placeholder = 'Saved in CRM — leave blank to keep';
+            }
+            console.log('[Setup] Settings loaded from record', state.settingsRecordId);
+            syncSettingsToServer();
+            return state.connectionsConfirmed;
           }
         }
       } catch (e) {
@@ -608,7 +628,10 @@
       const data = await resp.json();
       if (data.settings && data.settings.docsAgentConnection) {
         state.settings = { ...state.settings, ...data.settings };
+        state.settings.workdriveFolder = data.settings.workdriveDefaultFolder || state.settings.workdriveFolder;
+        state.settingsRecordId = data.settings.settingsRecordId || state.settingsRecordId;
         state.connectionsConfirmed = true;
+        renderSettingsRecordStatus();
         return true;
       }
     } catch (e) {
@@ -680,7 +703,91 @@
       headers: { 'Content-Type': 'application/json' },
       body: payload && Object.keys(payload).length > 0 ? JSON.stringify(payload) : undefined
     });
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || data.message || `Request failed (${res.status})`);
+    }
+    return data;
+  }
+
+  function showToast(message, type = 'success') {
+    let host = document.getElementById('toastHost');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toastHost';
+      host.className = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    host.appendChild(toast);
+    setTimeout(() => {
+      toast.classList.add('toast-out');
+      setTimeout(() => toast.remove(), 250);
+    }, 4200);
+  }
+
+  function setScanStatus(text) {
+    const el = document.getElementById('scanLiveStatus');
+    if (el) el.textContent = text;
+  }
+
+  function renderSettingsRecordStatus() {
+    const title = document.getElementById('settingsRecordMode');
+    const detail = document.getElementById('settingsRecordDetail');
+    if (!detail) return;
+    if (state.settingsRecordId) {
+      if (title) title.textContent = 'Update mode:';
+      const extra = state.duplicateSettingsCount > 1 ? ` ${state.duplicateSettingsCount} rows already exist; this save updates the latest one and does not add another.` : '';
+      detail.textContent = `Next save updates Living_Docs_Settings record ${state.settingsRecordId}. A new row is not created.${extra}`;
+    } else {
+      if (title) title.textContent = 'Create mode:';
+      detail.textContent = 'No settings row yet. The first save creates one record. Every later save updates that same record.';
+    }
+  }
+
+  function canUseZohoConnection() {
+    return state.isZohoEmbedded && typeof ZOHO !== 'undefined' && !!(ZOHO.CRM && ZOHO.CRM.CONNECTION && ZOHO.CRM.CONNECTION.invoke);
+  }
+
+  function emptyClientSnapshot(message) {
+    return {
+      id: 'snap_empty',
+      timestamp: new Date().toISOString(),
+      source: 'none',
+      message: message || '',
+      stats: {
+        total_modules: 0,
+        total_fields: 0,
+        total_workflows: 0,
+        total_blueprints: 0,
+        total_functions: 0
+      },
+      modules: [],
+      functions: []
+    };
+  }
+
+  function updateAllKpis(snapshot) {
+    const stats = (snapshot && snapshot.stats) || {};
+    if (dom.statModulesCount) dom.statModulesCount.textContent = stats.total_modules || 0;
+    if (dom.statFieldsCount) dom.statFieldsCount.textContent = stats.total_fields || 0;
+    if (dom.statBlueprintsCount) dom.statBlueprintsCount.textContent = stats.total_blueprints || 0;
+    if (dom.statFunctionsCount) dom.statFunctionsCount.textContent = stats.total_functions || 0;
+    const modulesSub = document.getElementById('statModulesSub');
+    const fieldsSub = document.getElementById('statFieldsSub');
+    const blueprintsSub = document.getElementById('statBlueprintsSub');
+    const functionsSub = document.getElementById('statFunctionsSub');
+    if (modulesSub) {
+      const conn = state.settings.docsAgentConnection || 'docsagent_connection';
+      modulesSub.textContent = snapshot && snapshot.source === 'zoho_crm_v8'
+        ? `${conn} · ZohoCRM.settings.modules.READ`
+        : 'Waiting for CRM API';
+    }
+    if (fieldsSub) fieldsSub.textContent = snapshot && snapshot.source === 'zoho_crm_v8' ? 'GET /settings/fields' : 'Waiting for CRM API';
+    if (blueprintsSub) blueprintsSub.textContent = snapshot && snapshot.source === 'zoho_crm_v8' ? 'GET /settings/blueprints' : 'Waiting for CRM API';
+    if (functionsSub) functionsSub.textContent = snapshot && snapshot.source === 'zoho_crm_v8' ? 'GET /settings/automation/functions' : 'Waiting for CRM API';
   }
 
   // ==========================================
@@ -758,15 +865,18 @@
     console.log(`[NamedConnection:${connName}] Response:`, rawResp);
 
     let parsed = rawResp;
-    if (rawResp?.details?.output) {
-      parsed = rawResp.details.output;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch (_) {}
-      }
-    } else if (rawResp?.result) {
+    const details = rawResp && rawResp.details;
+    if (details && typeof details === 'object' && details.statusMessage !== undefined) {
+      parsed = details.statusMessage;
+    } else if (details && typeof details === 'object' && details.output !== undefined) {
+      parsed = details.output;
+    } else if (rawResp?.result !== undefined) {
       parsed = rawResp.result;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch (_) {}
+    }
+    if (typeof parsed === 'string') {
+      const trimmed = parsed.trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try { parsed = JSON.parse(trimmed); } catch (_) {}
       }
     }
 
@@ -833,6 +943,146 @@
 
     const result = Array.from(profileMap.keys()).map(id => ({ id }));
     return result;
+  }
+
+  function syncSettingsToServer() {
+    const payload = {
+      claudeModel: state.settings.claudeModel,
+      workdriveDefaultFolder: state.settings.workdriveFolder,
+      docsAgentConnection: state.settings.docsAgentConnection,
+      workdriveConnection: state.settings.workdriveConnection,
+      scheduleFrequency: state.settings.scheduleFrequency,
+      settingsRecordId: state.settingsRecordId
+    };
+    if (state.settings.claudeApiKey) payload.claudeApiKey = state.settings.claudeApiKey;
+    return fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).catch(() => null);
+  }
+
+  function zohoWriteResult(resp) {
+    const row = resp?.data?.[0];
+    if (!row) return { ok: false, message: 'Zoho CRM returned an empty response.' };
+    if (row.code === 'SUCCESS' || row.status === 'success') {
+      return { ok: true, id: row.details?.id || null, message: row.message || 'Saved' };
+    }
+    return { ok: false, code: row.code, message: row.message || row.code || 'CRM rejected the settings record.' };
+  }
+
+  function pickSettingsRecord(rows) {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const named = rows.filter(r => r.Name === 'agent_config_v1');
+    const pool = named.length ? named : rows;
+    pool.sort((a, b) => new Date(b.Modified_Time || b.Created_Time || 0) - new Date(a.Modified_Time || a.Created_Time || 0));
+    return pool[0];
+  }
+
+  async function findExistingSettingsRecord() {
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.API) return null;
+    if (ZOHO.CRM.API.searchRecord) {
+      try {
+        const search = await ZOHO.CRM.API.searchRecord({
+          Entity: 'Living_Docs_Settings',
+          Type: 'criteria',
+          Query: '(Name:equals:agent_config_v1)'
+        });
+        const found = pickSettingsRecord(search?.data || []);
+        if (found) return found;
+      } catch (err) {
+        console.warn('[Settings search]', err);
+      }
+    }
+    if (ZOHO.CRM.API.getAllRecords) {
+      try {
+        const resp = await ZOHO.CRM.API.getAllRecords({
+          Entity: 'Living_Docs_Settings',
+          sort_order: 'desc',
+          per_page: 200
+        });
+        return pickSettingsRecord(resp?.data || []);
+      } catch (err) {
+        console.warn('[Settings list]', err);
+      }
+    }
+    return null;
+  }
+
+  async function upsertSettingsRecord(fields) {
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.API) {
+      return { ok: true, action: 'server-only', id: state.settingsRecordId || null };
+    }
+
+    let existingId = state.settingsRecordId;
+    if (!existingId) {
+      const existing = await findExistingSettingsRecord();
+      existingId = existing?.id || null;
+    }
+
+    const APIData = {
+      Name: 'agent_config_v1',
+      Docs_Agent_Connection: fields.docsAgentConnection,
+      Workdrive_Connection: fields.workdriveConnection,
+      Claude_Model: fields.claudeModel,
+      Workdrive_Folder_Id: fields.workdriveFolder
+    };
+    if (fields.claudeApiKey) APIData.Claude_API_Key = fields.claudeApiKey;
+    if (fields.scheduleFrequency) APIData.Schedule_Frequency = fields.scheduleFrequency;
+
+    const write = async (data, isUpdate) => {
+      if (isUpdate) {
+        return ZOHO.CRM.API.updateRecord({
+          Entity: 'Living_Docs_Settings',
+          APIData: data
+        });
+      }
+      return ZOHO.CRM.API.insertRecord({
+        Entity: 'Living_Docs_Settings',
+        APIData: data
+      });
+    };
+
+    const attempt = async (data, isUpdate) => {
+      try {
+        const resp = await write(data, isUpdate);
+        let result = zohoWriteResult(resp);
+        if (!result.ok) {
+          const slim = { ...data };
+          delete slim.Claude_API_Key;
+          delete slim.Schedule_Frequency;
+          const retry = await write(slim, isUpdate);
+          result = zohoWriteResult(retry);
+        }
+        return result;
+      } catch (err) {
+        return { ok: false, message: err.message || String(err) };
+      }
+    };
+
+    if (existingId && ZOHO.CRM.API.updateRecord) {
+      const updateData = { ...APIData, id: existingId };
+      const updated = await attempt(updateData, true);
+      if (updated.ok) {
+        state.settingsRecordId = existingId;
+        return { ok: true, action: 'updated', id: existingId };
+      }
+      const missing = /not found|invalid data|the id given seems to be invalid/i.test(updated.message || '');
+      if (!missing) {
+        return { ok: false, action: 'update-failed', id: existingId, message: updated.message };
+      }
+      state.settingsRecordId = null;
+    }
+
+    if (!ZOHO.CRM.API.insertRecord) {
+      return { ok: false, action: 'unavailable', message: 'Zoho CRM record API is not available in this widget.' };
+    }
+    const created = await attempt(APIData, false);
+    if (!created.ok) {
+      return { ok: false, action: 'create-failed', message: created.message };
+    }
+    state.settingsRecordId = created.id || state.settingsRecordId;
+    return { ok: true, action: 'created', id: state.settingsRecordId };
   }
 
   // ==========================================
@@ -931,7 +1181,9 @@
           { field_label: 'Docs Agent Connection', data_type: 'text', length: 120 },
           { field_label: 'Workdrive Connection', data_type: 'text', length: 120 },
           { field_label: 'Claude Model', data_type: 'text', length: 100 },
-          { field_label: 'Workdrive Folder Id', data_type: 'text', length: 150 }
+          { field_label: 'Workdrive Folder Id', data_type: 'text', length: 150 },
+          { field_label: 'Claude API Key', data_type: 'text', length: 255 },
+          { field_label: 'Schedule Frequency', data_type: 'text', length: 40 }
         ];
 
         try {
@@ -1000,21 +1252,26 @@
           log(`Fields status for Living_Docs_Snapshots: ${fErr.message || 'Configured'}`, 'info');
         }
 
-        // 7. Insert / Upsert Configuration Record into Living_Docs_Settings
-        if (ZOHO.CRM.API && ZOHO.CRM.API.insertRecord) {
+        // 7. Create the settings row once, then update that same row
+        if (showFeedback && ZOHO.CRM.API) {
           try {
-            log('Saving configuration record into Living_Docs_Settings...', 'info');
-            const insertResp = await withTimeout(ZOHO.CRM.API.insertRecord({
-              Entity: 'Living_Docs_Settings',
-              APIData: {
-                Name: 'agent_config_v1',
-                Docs_Agent_Connection: state.settings.docsAgentConnection,
-                Workdrive_Connection: state.settings.workdriveConnection,
-                Claude_Model: state.settings.claudeModel,
-                Workdrive_Folder_Id: state.settings.workdriveFolder
-              }
-            }), 4000, null);
-            log('✅ Configuration saved directly in Living_Docs_Settings record.', 'ok');
+            log('Saving configuration into the existing Living_Docs_Settings row when one already exists...', 'info');
+            const saved = await upsertSettingsRecord({
+              docsAgentConnection: state.settings.docsAgentConnection,
+              workdriveConnection: state.settings.workdriveConnection,
+              claudeModel: state.settings.claudeModel,
+              workdriveFolder: state.settings.workdriveFolder,
+              claudeApiKey: state._pendingClaudeKey || state.settings.claudeApiKey || '',
+              scheduleFrequency: state.settings.scheduleFrequency || 'daily'
+            });
+            if (saved.ok && saved.action === 'updated') {
+              log(`✅ Updated existing settings record ${saved.id}.`, 'ok');
+            } else if (saved.ok && saved.action === 'created') {
+              log(`✅ Created the first settings record ${saved.id || ''}.`, 'ok');
+            } else if (!saved.ok) {
+              log(`Settings save notice: ${saved.message || 'Could not write the settings row.'}`, 'warn');
+            }
+            renderSettingsRecordStatus();
           } catch (recErr) {
             log(`Settings record save notice: ${recErr.message || 'Saved'}`, 'info');
           }
@@ -1049,37 +1306,253 @@
   // ==========================================
   async function runFullScan() {
     dom.btnRunFullScan.disabled = true;
-    dom.btnRunFullScan.innerHTML = '<span>Scanning CRM Metadata...</span>';
+    dom.btnRunFullScan.innerHTML = '<span>Scanning CRM API...</span>';
+    document.querySelectorAll('.stat-box').forEach(box => box.classList.add('is-loading'));
+
+    const snapshot = emptyClientSnapshot();
+    snapshot.source = canUseZohoConnection() ? 'zoho_crm_v8' : 'none';
+    const firstScan = !state.baselineSnapshot;
 
     try {
-      // 100% Widget-orchestrated scanning
-      const resp = await apiCall('/scan', {});
-      const snapshot = resp.snapshot || resp;
-      state.activeSnapshot = snapshot;
-      if (!state.baselineSnapshot) {
-        state.baselineSnapshot = snapshot;
+      if (!canUseZohoConnection()) {
+        setScanStatus('Open this widget inside Zoho CRM. KPIs stay at 0 until the CRM APIs respond.');
+        state.allWorkflowsList = [];
+        state.activeSnapshot = snapshot;
+        updateAllKpis(snapshot);
+        updateWorkflowCountStats(snapshot);
+        renderInventoryTable(snapshot);
+        renderWorkflowsTable(snapshot);
+        showScopesInfoBadge('standalone');
+        showToast('Live CRM data is available when this widget runs inside Zoho CRM.', 'warning');
+        return;
       }
 
-      // Update UI Metrics
-      dom.statModulesCount.textContent = snapshot.stats?.total_modules || snapshot.modules?.length || 0;
-      dom.statFieldsCount.textContent = snapshot.stats?.total_fields || 0;
-      dom.statWorkflowsCount.textContent = snapshot.stats?.total_workflows || 0;
-      dom.statBlueprintsCount.textContent = snapshot.stats?.total_blueprints || 0;
-      dom.statFunctionsCount.textContent = snapshot.stats?.total_functions || snapshot.functions?.length || 0;
-      dom.scanTimestampBadge.textContent = `Last Scanned: ${new Date(snapshot.timestamp || Date.now()).toLocaleTimeString()}`;
-
-      // Populate Inventory Table & Workflows Table (initial/simulated data)
+      const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+      setScanStatus(`Loading modules from ${docsConn} · GET /crm/v8/settings/modules …`);
+      state.activeSnapshot = snapshot;
+      try {
+        await loadModulesViaConnection(snapshot);
+      } catch (moduleErr) {
+        console.error('Module scan failed:', moduleErr);
+        showToast(moduleErr.message || 'Could not load CRM modules.', 'error');
+      }
+      setScanStatus('Loading workflow rules from GET /crm/v8/settings/automation/workflow_rules …');
+      try {
+        await fetchAndMergeRealWorkflows(snapshot);
+      } catch (workflowErr) {
+        console.error('Workflow scan failed:', workflowErr);
+        showToast(workflowErr.message || 'Could not load workflow rules.', 'error');
+        showScopesInfoBadge('scope_error');
+      }
+      await fillModuleFieldBlueprintFunctionStats(snapshot);
+      snapshot.timestamp = new Date().toISOString();
+      snapshot.id = 'snap_' + Date.now();
+      state.activeSnapshot = snapshot;
+      if (firstScan) state.baselineSnapshot = JSON.parse(JSON.stringify(snapshot));
       renderInventoryTable(snapshot);
-      renderWorkflowsTable(snapshot);
-
-      // Then attempt to fetch REAL Zoho CRM Workflow Rules via Named Connection
-      await fetchAndMergeRealWorkflows(snapshot);
+      dom.scanTimestampBadge.textContent = `Last Scanned: ${new Date(snapshot.timestamp).toLocaleTimeString()}`;
+      apiCall('/live-cache', { snapshot }).catch(() => {});
     } catch (err) {
       console.error('Scan failed:', err);
+      showToast(err.message || 'CRM scan failed', 'error');
+      showScopesInfoBadge('scope_error');
     } finally {
+      document.querySelectorAll('.stat-box').forEach(box => box.classList.remove('is-loading'));
       dom.btnRunFullScan.disabled = false;
       dom.btnRunFullScan.innerHTML = '<span>Run Full Scan</span>';
     }
+  }
+
+  function isScannableModule(mod) {
+    if (!mod || !mod.api_name) return false;
+    if (mod.api_supported === false) return false;
+    const generated = String(mod.generated_type || '').toLowerCase();
+    return generated !== 'subform' && generated !== 'linking' && generated !== 'web';
+  }
+
+  async function mapPool(items, limit, worker) {
+    const queue = items.slice();
+    const runners = Array.from({ length: Math.min(limit, Math.max(items.length, 1)) }, async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        await worker(item);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  async function fetchCrmModules(docsConn) {
+    const connectionName = docsConn || state.settings.docsAgentConnection || 'docsagent_connection';
+    const resp = await withTimeout(invokeZohoConnectionAPI(connectionName, {
+      endpoint: '/crm/v8/settings/modules',
+      method: 'GET'
+    }), 20000, null);
+    if (!resp) {
+      throw new Error(`GET /crm/v8/settings/modules timed out on "${connectionName}". Confirm scope ZohoCRM.settings.modules.READ.`);
+    }
+    if (resp.code && (resp.status === 'error' || resp.code === 'OAUTH_SCOPE_MISMATCH' || resp.code === 'NO_PERMISSION' || resp.code === 'AUTHORIZATION_FAILED')) {
+      throw new Error(`${resp.message || resp.code} on "${connectionName}". Add ZohoCRM.settings.modules.READ or ZohoCRM.settings.ALL.`);
+    }
+    const mods = resp.modules || resp.data || [];
+    if (!Array.isArray(mods)) {
+      throw new Error(`"${connectionName}" did not return a modules list from GET /crm/v8/settings/modules.`);
+    }
+    return mods;
+  }
+
+  async function loadModulesViaConnection(snapshot) {
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    const modules = await fetchCrmModules(docsConn);
+    const usable = modules.filter(isScannableModule);
+    snapshot.crmModules = modules;
+    snapshot.source = 'zoho_crm_v8';
+    snapshot.stats.total_modules = usable.length;
+    if (!snapshot.modules) snapshot.modules = [];
+    usable.forEach(mod => {
+      let entry = snapshot.modules.find(item => item.module === mod.api_name);
+      if (!entry) {
+        entry = {
+          module: mod.api_name,
+          component_id: String(mod.id || mod.api_name),
+          fields: [],
+          workflows: [],
+          blueprints: []
+        };
+        snapshot.modules.push(entry);
+      }
+      entry.component_id = String(mod.id || entry.component_id || mod.api_name);
+      entry.singular_label = mod.singular_label || mod.plural_label || mod.api_name;
+      entry.generated_type = mod.generated_type || '';
+      entry.isBlueprintSupported = mod.isBlueprintSupported === true;
+    });
+    updateAllKpis(snapshot);
+    renderInventoryTable(snapshot);
+    setScanStatus(`${usable.length} modules loaded from ${docsConn} · GET /crm/v8/settings/modules`);
+  }
+
+  async function fetchModuleFields(docsConn, moduleApiName) {
+    const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: `/crm/v8/settings/fields?module=${encodeURIComponent(moduleApiName)}`,
+      method: 'GET'
+    }), 15000, null);
+    return Array.isArray(resp?.fields) ? resp.fields : [];
+  }
+
+  async function fetchModuleBlueprints(docsConn, moduleApiName) {
+    const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: `/crm/v8/settings/blueprints?module=${encodeURIComponent(moduleApiName)}`,
+      method: 'GET'
+    }), 12000, null);
+    if (Array.isArray(resp?.blueprints)) return resp.blueprints;
+    if (Array.isArray(resp?.blueprint)) return resp.blueprint;
+    if (resp?.blueprint && typeof resp.blueprint === 'object') return [resp.blueprint];
+    return [];
+  }
+
+  async function fetchCrmFunctions(docsConn) {
+    const endpoints = [
+      '/crm/v8/settings/automation/functions',
+      '/crm/v8/functions',
+      '/crm/v2/settings/functions'
+    ];
+    for (const endpoint of endpoints) {
+      const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+        endpoint,
+        method: 'GET'
+      }), 12000, null);
+      const list = resp?.functions || resp?.automation_functions;
+      if (Array.isArray(list)) {
+        return list.map(fn => ({
+          id: String(fn.id || fn.api_name || fn.name || ''),
+          name: fn.name || fn.display_name || fn.api_name || 'Function',
+          api_name: fn.api_name || fn.name || '',
+          return_type: fn.return_type || '',
+          description: fn.description || ''
+        }));
+      }
+    }
+    return [];
+  }
+
+  async function fetchOrgLabel(docsConn) {
+    const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: '/crm/v8/org',
+      method: 'GET'
+    }), 8000, null);
+    const org = resp?.org?.[0];
+    return org?.company_name || null;
+  }
+
+  async function fillModuleFieldBlueprintFunctionStats(snapshot) {
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    setScanStatus('Loading modules, fields, blueprints, and functions…');
+    const orgName = await fetchOrgLabel(docsConn);
+    if (orgName && dom.headerOrgLabel) dom.headerOrgLabel.textContent = orgName;
+
+    const modules = snapshot.crmModules || await fetchCrmModules(docsConn);
+    const usable = modules.filter(isScannableModule);
+    snapshot.stats.total_modules = usable.length;
+    snapshot.stats.total_workflows = state.allWorkflowsList.length;
+    updateAllKpis(snapshot);
+
+    let totalFields = 0;
+    let totalBlueprints = 0;
+    let done = 0;
+    await mapPool(usable, 4, async (mod) => {
+      const [fields, blueprints] = await Promise.all([
+        fetchModuleFields(docsConn, mod.api_name),
+        mod.isBlueprintSupported === true ? fetchModuleBlueprints(docsConn, mod.api_name) : Promise.resolve([])
+      ]);
+      totalFields += fields.length;
+      totalBlueprints += blueprints.length;
+      done += 1;
+
+      let entry = (snapshot.modules || []).find(m => m.module === mod.api_name);
+      if (!entry) {
+        entry = {
+          module: mod.api_name,
+          component_id: String(mod.id || mod.api_name),
+          fields: [],
+          workflows: [],
+          blueprints: []
+        };
+        snapshot.modules.push(entry);
+      }
+      entry.component_id = String(mod.id || entry.component_id || mod.api_name);
+      entry.singular_label = mod.singular_label || mod.api_name;
+      entry.fields = fields.map(f => ({
+        id: f.id,
+        api_name: f.api_name,
+        label: f.field_label || f.display_label || f.api_name,
+        data_type: f.data_type,
+        required: !!(f.system_mandatory || f.required),
+        custom_field: f.custom_field === true
+      }));
+      entry.blueprints = blueprints.map(bp => ({
+        id: String(bp.id || ''),
+        name: bp.name || 'Blueprint',
+        field_name: (bp.field && bp.field.api_name) || bp.field_name || '',
+        transitions: bp.transitions || []
+      }));
+      snapshot.stats.total_fields = totalFields;
+      snapshot.stats.total_blueprints = totalBlueprints;
+      snapshot.stats.total_modules = usable.length;
+      snapshot.stats.total_workflows = state.allWorkflowsList.length;
+      if (done % 2 === 0 || done === usable.length) {
+        updateAllKpis(snapshot);
+        setScanStatus(`Live CRM scan ${done}/${usable.length} modules · ${totalFields} fields · ${state.allWorkflowsList.length} workflows`);
+      }
+    });
+
+    const functions = await fetchCrmFunctions(docsConn);
+    snapshot.functions = functions;
+    snapshot.stats.total_functions = functions.length;
+    snapshot.stats.total_fields = totalFields;
+    snapshot.stats.total_blueprints = totalBlueprints;
+    snapshot.stats.total_workflows = state.allWorkflowsList.length;
+    snapshot.source = 'zoho_crm_v8';
+    updateAllKpis(snapshot);
+    setScanStatus(`Live data · ${usable.length} modules · ${state.allWorkflowsList.length} workflows · ${totalFields} fields`);
   }
 
   // ==========================================
@@ -1092,77 +1565,292 @@
     const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
 
     if (dom.workflowTotalCountBadge) {
-      dom.workflowTotalCountBadge.textContent = '⏳ Fetching from Zoho CRM...';
+      dom.workflowTotalCountBadge.textContent = 'Fetching from Zoho CRM...';
     }
 
-    // Strategy 1: Zoho Named Connection (when running inside CRM Widget)
-    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.CONNECTION && ZOHO.CRM.CONNECTION.invoke) {
-      try {
-        console.log('[Workflows] Fetching via Named Connection:', docsConn, 'using Scope: ZohoCRM.settings.workflow_rules.READ');
-        let allRules = [];
-        let page = 1;
-        let hasMore = true;
-
-        // Fetch all pages (up to 5 pages / 1000 rules)
-        while (hasMore && page <= 5) {
-          const wfResp = await withTimeout(
-            invokeZohoConnectionAPI(docsConn, {
-              endpoint: '/crm/v8/settings/automation/workflow_rules',
-              method: 'GET',
-              queryParams: { page: page, per_page: 200 }
-            }),
-            8000,
-            null
-          );
-
-          const rules = (wfResp && (wfResp.workflow_rules || wfResp.data || wfResp.workflows)) || [];
-          if (Array.isArray(rules) && rules.length > 0) {
-            allRules = allRules.concat(rules);
-          }
-          hasMore = (wfResp?.info?.more_records === true && rules.length === 200);
-          page++;
-        }
-
-        if (allRules.length > 0) {
-          console.log('[Workflows] Got ' + allRules.length + ' real workflow rules from Zoho CRM API v8');
-          const normalized = normalizeZohoWorkflows(allRules);
-          injectWorkflowsIntoSnapshot(snapshot, normalized);
-          renderWorkflowsTable(snapshot);
-          updateWorkflowCountStats(snapshot);
-          showScopesInfoBadge('live');
-          return;
-        } else {
-          console.warn('[Workflows] Named Connection returned empty workflow list — check scopes');
-          showScopesInfoBadge('scope_error');
-        }
-      } catch (connErr) {
-        console.warn('[Workflows] Named Connection fetch failed:', connErr.message);
-        showScopesInfoBadge('scope_error');
-      }
+    if (!canUseZohoConnection()) {
+      state.allWorkflowsList = [];
+      if (!snapshot.modules) snapshot.modules = [];
+      renderWorkflowsTable(snapshot);
+      updateWorkflowCountStats(snapshot);
+      showScopesInfoBadge('standalone');
+      return;
     }
 
-    // Strategy 2: Server-side proxy (standalone / dev mode)
-    try {
-      console.log('[Workflows] Fetching via server proxy /api/crm/workflows');
-      const wfData = await fetch('/api/crm/workflows').then(function(r) { return r.json(); });
-      const rules = wfData.workflow_rules || [];
-      if (rules.length > 0) {
-        console.log('[Workflows] Server proxy returned ' + rules.length + ' workflow rules');
-        const normalized = normalizeZohoWorkflows(rules);
-        injectWorkflowsIntoSnapshot(snapshot, normalized);
-        renderWorkflowsTable(snapshot);
-        updateWorkflowCountStats(snapshot);
-        showScopesInfoBadge('simulated');
-        return;
-      }
-    } catch (serverErr) {
-      console.warn('[Workflows] Server proxy failed:', serverErr.message);
-    }
-
-    // Fallback: use simulated data already rendered from /api/scan
-    console.log('[Workflows] Using simulated data from scan snapshot');
+    const allRules = await fetchAllWorkflowRulePages(docsConn);
+    const detailed = await enrichWorkflowRules(docsConn, allRules);
+    const normalized = normalizeZohoWorkflows(detailed);
+    injectWorkflowsIntoSnapshot(snapshot, normalized);
+    snapshot.stats = snapshot.stats || {};
+    snapshot.stats.total_workflows = normalized.length;
+    renderWorkflowsTable(snapshot);
     updateWorkflowCountStats(snapshot);
-    showScopesInfoBadge('simulated');
+    showScopesInfoBadge('live');
+    setScanStatus(`${normalized.length} workflow rules loaded from Zoho CRM.`);
+  }
+
+  async function fetchAllWorkflowRulePages(docsConn) {
+    const allRules = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 25) {
+      const wfResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+        endpoint: `/crm/v8/settings/automation/workflow_rules?page=${page}&per_page=200`,
+        method: 'GET'
+      }), 20000, null);
+      console.log('==================================wfResp==================================================', wfResp);
+      if (!wfResp) {
+        throw new Error('Workflow rules request timed out. Check the docsagent connection and ZohoCRM.settings.workflow_rules.READ scope.');
+      }
+      if (wfResp.code && (wfResp.status === 'error' || wfResp.code === 'OAUTH_SCOPE_MISMATCH')) {
+        throw new Error(wfResp.message || wfResp.code);
+      }
+      const rules = wfResp.workflow_rules || wfResp.data || wfResp.workflows || [];
+      if (!Array.isArray(rules) || rules.length === 0) break;
+      allRules.push(...rules);
+      hasMore = wfResp.info?.more_records === true;
+      page += 1;
+    }
+    return allRules;
+  }
+
+  async function enrichWorkflowRules(docsConn, rules) {
+    const moduleNames = [...new Set(rules.map(rule => (rule.module && (rule.module.api_name || rule.module)) || '').filter(Boolean))];
+    const byId = new Map(rules.map(rule => [String(rule.id), rule]));
+    const include = 'conditions,conditions.instant_actions,conditions.criteria_details,conditions.scheduled_actions';
+    for (const moduleName of moduleNames) {
+      let page = 1;
+      let hasMore = true;
+      while (hasMore && page <= 10) {
+        const endpoint = `/crm/v8/settings/automation/workflow_rules?module=${encodeURIComponent(moduleName)}&page=${page}&per_page=200&include_inner_details=${encodeURIComponent(include)}`;
+        const wfResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+          endpoint,
+          method: 'GET'
+        }), 20000, null);
+        const detailed = wfResp?.workflow_rules || wfResp?.data || [];
+        if (!Array.isArray(detailed) || detailed.length === 0) break;
+        detailed.forEach(rule => {
+          if (rule && rule.id) byId.set(String(rule.id), rule);
+        });
+        hasMore = wfResp?.info?.more_records === true;
+        page += 1;
+      }
+    }
+    return Array.from(byId.values());
+  }
+
+  async function hydrateWorkflowRecord(workflow) {
+    if (!canUseZohoConnection() || !workflow?.id) return workflow;
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    const singleResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: `/crm/v8/settings/automation/workflow_rules/${encodeURIComponent(workflow.id)}`,
+      method: 'GET'
+    }), 15000, null);
+    const raw = singleResp?.workflow_rules?.[0];
+    if (!raw) return workflow;
+    const normalized = normalizeZohoWorkflows([raw])[0];
+    return { ...workflow, ...normalized, module: normalized.module || workflow.module };
+  }
+
+  // Workflow actions only store the function id and name.
+  // The implementation is a separate download: GET /crm/v8/settings/functions/{id}/code
+  // https://www.zoho.com/crm/developer/docs/api/v8/download-function-code.html
+  function collectFunctionActions(workflow) {
+    const source = workflow?._raw || workflow || {};
+    const asList = (value) => Array.isArray(value) ? value : (value ? [value] : []);
+    const found = [];
+    const push = (action, timing) => {
+      if (!action || typeof action !== 'object') return;
+      const type = String(action.type || action.action_type || '');
+      if (!/function|deluge/i.test(type)) return;
+      const related = action.related_details || {};
+      found.push({
+        id: String(action.id || related.id || ''),
+        api_name: related.api_name || action.api_name || '',
+        name: action.name || action.action_name || related.name || '',
+        type,
+        timing
+      });
+    };
+    asList(source.conditions).forEach((condition) => {
+      asList(condition.instant_actions).forEach((group) => {
+        asList(group.actions).forEach((action) => push(action, 'instant'));
+      });
+      asList(condition.scheduled_actions).forEach((group) => {
+        asList(group.actions).forEach((action) => push(action, 'scheduled'));
+      });
+    });
+    asList(source.actions).forEach((action) => push(action, 'instant'));
+    if (!found.length) {
+      asList(workflow?.actions).forEach((action) => {
+        if (typeof action !== 'string') return;
+        const match = action.match(/^(?:\[Scheduled\]\s*)?(?:functions|function|deluge)\s*:\s*(.+)$/i);
+        if (match) {
+          found.push({
+            id: '',
+            api_name: '',
+            name: match[1].trim(),
+            type: 'functions',
+            timing: /scheduled/i.test(action) ? 'scheduled' : 'instant'
+          });
+        }
+      });
+    }
+    const seen = new Set();
+    return found.filter((item) => {
+      const key = `${item.id}|${item.api_name}|${item.name}|${item.timing}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  async function fetchFunctionCatalog(docsConn) {
+    const pages = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 20) {
+      const endpoint = page === 1
+        ? '/crm/v8/settings/functions?per_page=200'
+        : `/crm/v8/settings/functions?page=${page}&per_page=200`;
+      const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+        endpoint,
+        method: 'GET'
+      }), 20000, null);
+      if (resp?.code && (resp.status === 'error' || resp.code === 'OAUTH_SCOPE_MISMATCH')) {
+        throw new Error(resp.message || resp.code);
+      }
+      const list = Array.isArray(resp?.functions) ? resp.functions : [];
+      if (!list.length) break;
+      pages.push(...list);
+      hasMore = resp.info?.more_records === true;
+      page += 1;
+    }
+    return pages;
+  }
+
+  function textFromFunctionDownload(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    if (typeof body.raw_text === 'string') return body.raw_text;
+    if (typeof body._code === 'string') return body._code;
+    if (typeof body.script === 'string') return body.script;
+    return '';
+  }
+
+  async function downloadFunctionSource(docsConn, identifier) {
+    const body = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: `/crm/v8/settings/functions/${encodeURIComponent(identifier)}/code`,
+      method: 'GET'
+    }), 20000, null);
+    if (!body) throw new Error(`Timed out downloading function ${identifier}`);
+    if (body.code && (body.status === 'error' || body.code === 'OAUTH_SCOPE_MISMATCH' || body.code === 'INVALID_DATA')) {
+      throw new Error(body.message || body.code);
+    }
+    const source = textFromFunctionDownload(body);
+    if (source.startsWith('PK')) {
+      return {
+        source: '',
+        note: 'Zoho returned a ZIP package. Java, Node.js, and Python functions download as ZIP; Deluge downloads as text.'
+      };
+    }
+    return {
+      source,
+      note: source ? '' : 'Download Function Code returned no text source.'
+    };
+  }
+
+  function matchCatalogFunction(catalog, ref) {
+    const id = String(ref.id || '');
+    const apiName = String(ref.api_name || '').toLowerCase();
+    const name = String(ref.name || '').trim().toLowerCase();
+    return catalog.find((fn) => id && String(fn.id) === id)
+      || catalog.find((fn) => apiName && String(fn.api_name || '').toLowerCase() === apiName)
+      || catalog.find((fn) => name && String(fn.api_name || '').toLowerCase() === name)
+      || catalog.find((fn) => name && String(fn.name || fn.display_name || '').trim().toLowerCase() === name)
+      || null;
+  }
+
+  async function attachFunctionCodeToWorkflows(workflows) {
+    if (!canUseZohoConnection() || !workflows?.length) return workflows || [];
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    let catalog = [];
+    try {
+      catalog = await fetchFunctionCatalog(docsConn);
+    } catch (err) {
+      console.warn('[DocsAgent] GET /crm/v8/settings/functions failed. Add ZohoCRM.settings.functions.READ to the connection.', err);
+    }
+    const cache = new Map();
+    const enriched = [];
+    for (const workflow of workflows) {
+      const refs = collectFunctionActions(workflow);
+      const functionCode = [];
+      for (const ref of refs) {
+        const match = matchCatalogFunction(catalog, ref);
+        const identifier = (match && (match.id || match.api_name)) || ref.id || ref.api_name;
+        const cacheKey = String(identifier || ref.name || '');
+        if (!cache.has(cacheKey)) {
+          if (!identifier) {
+            cache.set(cacheKey, {
+              name: ref.name,
+              source: '',
+              error: 'This workflow action has a function name but no function id, and it was not found in GET /settings/functions.'
+            });
+          } else {
+            try {
+              const downloaded = await downloadFunctionSource(docsConn, identifier);
+              const source = downloaded.source || '';
+              cache.set(cacheKey, {
+                id: String((match && match.id) || ref.id || ''),
+                api_name: (match && match.api_name) || ref.api_name || '',
+                name: (match && (match.name || match.display_name)) || ref.name || '',
+                category: (match && match.category) || '',
+                language: (match && match.language) || '',
+                runtime: (match && match.runtime) || '',
+                description: (match && match.description) || '',
+                arguments: (match && match.arguments) || [],
+                source: source.slice(0, 12000),
+                source_truncated: source.length > 12000,
+                note: downloaded.note || ''
+              });
+            } catch (err) {
+              cache.set(cacheKey, {
+                id: String(ref.id || ''),
+                api_name: ref.api_name || '',
+                name: ref.name || '',
+                source: '',
+                error: err.message || String(err)
+              });
+            }
+          }
+        }
+        functionCode.push({
+          timing: ref.timing,
+          action_type: ref.type,
+          ...cache.get(cacheKey)
+        });
+      }
+      const copy = { ...workflow, function_code: functionCode };
+      delete copy._raw;
+      enriched.push(copy);
+    }
+    return enriched;
+  }
+
+  function formatCriteria(criteria) {
+    if (criteria == null || criteria === '') return '';
+    if (typeof criteria === 'string') return criteria;
+    if (Array.isArray(criteria)) return criteria.map(formatCriteria).filter(Boolean).join(' AND ');
+    if (typeof criteria !== 'object') return String(criteria);
+    if (criteria.group_operator && Array.isArray(criteria.group)) {
+      return criteria.group.map(formatCriteria).filter(Boolean).join(` ${criteria.group_operator} `);
+    }
+    if (criteria.field || criteria.comparator || criteria.value != null) {
+      const field = (criteria.field && (criteria.field.api_name || criteria.field)) || 'Field';
+      const value = criteria.value == null ? '' : (typeof criteria.value === 'object' ? JSON.stringify(criteria.value) : criteria.value);
+      return `${field} ${criteria.comparator || ''} ${value}`.trim();
+    }
+    return '';
   }
 
   // Normalize Zoho CRM API v8 workflow_rules → internal format with conditions & actions
@@ -1174,11 +1862,9 @@
                  wf.criteria || null;
       if (!crit && wf.conditions && wf.conditions.length > 0) {
         const c0 = wf.conditions[0];
-        if (c0.criteria_details?.criteria) {
-          const cObj = c0.criteria_details.criteria;
-          crit = `${cObj.field?.api_name || 'Field'} ${cObj.comparator || 'equals'} ${cObj.value || ''}`;
-        }
+        if (c0.criteria_details?.criteria) crit = c0.criteria_details.criteria;
       }
+      if (crit && typeof crit === 'object') crit = formatCriteria(crit);
 
       // Extract actions from wf.actions OR wf.conditions
       let actionList = wf.actions || wf.workflow_actions || [];
@@ -1290,7 +1976,7 @@
     // Update KPI Card Total Workflows
     if (dom.statWorkflowsCount) dom.statWorkflowsCount.textContent = total;
     if (dom.statWorkflowsSub) {
-      dom.statWorkflowsSub.textContent = `${activeCount} active · Scope: v8 READ`;
+      dom.statWorkflowsSub.textContent = total > 0 ? `${activeCount} active · GET /workflow_rules` : 'GET /settings/automation/workflow_rules';
     }
 
     // Update Explorer Badge
@@ -1361,6 +2047,11 @@
       scopeBadge.style.color = '#1e40af';
       scopeBadge.style.border = '1px solid #bfdbfe';
       scopeBadge.innerHTML = '⚡ <strong>Zoho CRM API v8 Workflows Active</strong> — Scope <code>ZohoCRM.settings.workflow_rules.READ</code> mapped to <code>' + conn + '</code>';
+    } else if (mode === 'standalone') {
+      scopeBadge.style.background = '#fff7ed';
+      scopeBadge.style.color = '#9a3412';
+      scopeBadge.style.border = '1px solid #fdba74';
+      scopeBadge.innerHTML = 'Open this widget inside Zoho CRM. Workflow rules are loaded with <code>GET /crm/v8/settings/automation/workflow_rules</code> and scope <code>ZohoCRM.settings.workflow_rules.READ</code>.';
     } else if (mode === 'scope_error') {
       scopeBadge.style.background = '#fee2e2';
       scopeBadge.style.color = '#991b1b';
@@ -1529,14 +2220,25 @@
   }
 
   function renderInventoryTable(snapshot) {
-    const modules = snapshot.modules || [];
+    const modules = (snapshot.modules || []).slice().sort((a, b) => (b.workflows || []).length - (a.workflows || []).length);
     let rows = '';
+
+    if (!modules.length) {
+      dom.inventoryTableBody.innerHTML = `
+        <tr>
+          <td colspan="7" style="text-align:center; padding:28px; color:var(--text-muted);">
+            No CRM modules yet. Run a scan inside Zoho CRM to load live metadata.
+          </td>
+        </tr>
+      `;
+      return;
+    }
 
     modules.forEach(m => {
       const fieldsCount = (m.fields || []).length;
       const wfCount = (m.workflows || []).length;
       const bpCount = (m.blueprints || []).length;
-      const hash = m.hash || 'hash_mod_' + m.module.toLowerCase();
+      const hash = m.hash || ('live_' + String(m.module || 'module').toLowerCase());
 
       rows += `
         <tr>
@@ -1546,7 +2248,7 @@
           <td><span class="badge badge-purple">${wfCount} workflows</span></td>
           <td><span class="badge badge-yellow">${bpCount} blueprints</span></td>
           <td><code>#${escapeHtml(hash.substring(0, 10))}</code></td>
-          <td><span class="badge badge-green">Documented</span></td>
+          <td><span class="badge badge-green">Live API</span></td>
         </tr>
       `;
     });
@@ -1676,6 +2378,13 @@
 
     dom.workflowTableBody.innerHTML = html;
 
+    dom.workflowTableBody.querySelectorAll('tr[data-wfid]').forEach(tr => {
+      tr.addEventListener('click', (e) => {
+        if (e.target.closest('input, button, a')) return;
+        openWorkflowDetailModal(tr.getAttribute('data-wfid'));
+      });
+    });
+
     // Bind row checkboxes
     dom.workflowTableBody.querySelectorAll('.wf-row-chk').forEach(chk => {
       chk.addEventListener('change', (e) => {
@@ -1784,9 +2493,9 @@
   }
 
   async function documentSelectedWorkflows() {
-    const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
+    let selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
     if (selectedWfs.length === 0) {
-      alert('Please select at least one workflow to document.');
+      showToast('Select at least one workflow to document.', 'warning');
       return;
     }
 
@@ -1796,7 +2505,16 @@
     }
 
     dom.btnGenerateDocs.disabled = true;
-    dom.btnGenerateDocs.innerHTML = `<span>Claude is documenting ${selectedWfs.length} Workflow(s)...</span>`;
+    dom.btnGenerateDocs.innerHTML = `<span>Loading ${selectedWfs.length} workflow rule(s)…</span>`;
+    try {
+      selectedWfs = await Promise.all(selectedWfs.map(wf => hydrateWorkflowRecord(wf)));
+      dom.btnGenerateDocs.innerHTML = `<span>Loading function source for ${selectedWfs.length} workflow(s)...</span>`;
+      selectedWfs = await attachFunctionCodeToWorkflows(selectedWfs);
+    } catch (hydrateErr) {
+      console.warn('[Workflow hydrate]', hydrateErr);
+    }
+    const coded = selectedWfs.filter(wf => (wf.function_code || []).some(fn => fn.source)).length;
+    dom.btnGenerateDocs.innerHTML = `<span>AI is documenting ${selectedWfs.length} workflow(s)${coded ? ` with ${coded} function source file(s)` : ''}...</span>`;
     dom.docRenderedOutput.innerHTML = `
       <div style="text-align:center; padding:50px; color:var(--text-muted);">
         <div class="status-dot" style="margin-bottom:8px;"></div>
@@ -1819,6 +2537,8 @@
       dom.docModelBadge.textContent = `Model: ${resp.model || 'Claude 3.5 Sonnet'}`;
 
       renderMarkdownOutput(state.generatedMarkdown);
+      if (resp.note) showToast(resp.note, 'warning');
+      await deliverDocumentationPdf(state.generatedMarkdown, 'Workflow_Documentation', resp.pdf_base64);
     } catch (err) {
       console.error('Workflow doc generation failed:', err);
       dom.docRenderedOutput.innerHTML = `<p style="color:var(--danger);">Error generating workflow documentation: ${escapeHtml(err.message)}</p>`;
@@ -1832,14 +2552,24 @@
   // 2. LIVING DOCS STUDIO
   // ==========================================
   async function generateDocs() {
+    if (!(state.allWorkflowsList || []).length && !(state.activeSnapshot && (state.activeSnapshot.modules || []).length)) {
+      showToast('Scan Zoho CRM first. Documentation is written from the live API payload.', 'warning');
+      return;
+    }
     dom.btnGenerateDocs.disabled = true;
     dom.btnGenerateDocs.innerHTML = '<span>Claude is analyzing CRM config...</span>';
     dom.docRenderedOutput.innerHTML = '<div style="text-align:center; padding:50px; color:var(--text-muted);"><div class="status-dot" style="margin-bottom:8px;"></div><p>Generating living documentation with Claude &amp; mapping components...</p></div>';
 
     try {
       const isWorkflowDoc = (dom.selectDocType.value === 'workflow_spec');
-      const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
-      const targetWorkflows = (selectedWfs.length > 0) ? selectedWfs : state.allWorkflowsList;
+      let selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
+      if (isWorkflowDoc && selectedWfs.length === 0) selectedWfs = state.allWorkflowsList.slice();
+      if (isWorkflowDoc && selectedWfs.length) {
+        dom.btnGenerateDocs.innerHTML = `<span>Loading workflow rules and function source...</span>`;
+        selectedWfs = await Promise.all(selectedWfs.map(wf => hydrateWorkflowRecord(wf)));
+        selectedWfs = await attachFunctionCodeToWorkflows(selectedWfs);
+      }
+      const targetWorkflows = selectedWfs;
 
       const payload = {
         doc_type: dom.selectDocType.value,
@@ -1856,6 +2586,9 @@
 
       // Render Markdown & Mermaid Flowcharts
       renderMarkdownOutput(state.generatedMarkdown);
+      if (resp.note) showToast(resp.note, 'warning');
+      const docTitle = (dom.selectDocType && dom.selectDocType.value === 'workflow_spec') ? 'Workflow_Documentation' : 'Zoho_CRM_Documentation';
+      await deliverDocumentationPdf(state.generatedMarkdown, docTitle, resp.pdf_base64);
 
       // Save to Living_Docs_Snapshots if running inside CRM SDK
       if (typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.API && ZOHO.CRM.API.insertRecord) {
@@ -1881,29 +2614,168 @@
     }
   }
 
-  function renderMarkdownOutput(markdown) {
-    if (typeof marked !== 'undefined') {
-      dom.docRenderedOutput.innerHTML = marked.parse(markdown);
-      // Initialize Mermaid charts
-      if (typeof mermaid !== 'undefined') {
-        const mermaidBlocks = dom.docRenderedOutput.querySelectorAll('pre code.language-mermaid, pre code.language-graph');
-        mermaidBlocks.forEach((block) => {
-          const pre = block.parentElement;
-          const graphCode = block.textContent;
-          const graphDiv = document.createElement('div');
-          graphDiv.className = 'mermaid';
-          graphDiv.textContent = graphCode;
-          pre.replaceWith(graphDiv);
-        });
-        try {
-          mermaid.run();
-        } catch (e) {
-          console.warn('Mermaid rendering notice:', e);
-        }
+  function renderMarkdownHtml(markdown) {
+    const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+    let html = '';
+    let inList = false;
+    let inCode = false;
+    let codeLines = [];
+    const inline = (text) => escapeHtml(text)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    const closeList = () => {
+      if (inList) {
+        html += '</ul>';
+        inList = false;
       }
-    } else {
-      dom.docRenderedOutput.innerHTML = `<pre>${escapeHtml(markdown)}</pre>`;
+    };
+    const closeCode = () => {
+      if (inCode) {
+        html += `<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`;
+        codeLines = [];
+        inCode = false;
+      }
+    };
+    lines.forEach((line) => {
+      if (line.trim().startsWith('```')) {
+        closeList();
+        if (inCode) closeCode();
+        else inCode = true;
+        return;
+      }
+      if (inCode) {
+        codeLines.push(line);
+        return;
+      }
+      if (!line.trim()) {
+        closeList();
+        return;
+      }
+      if (/^[\s|:-]+$/.test(line)) return;
+      const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+      if (heading) {
+        closeList();
+        html += `<h${heading[1].length}>${inline(heading[2])}</h${heading[1].length}>`;
+        return;
+      }
+      if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
+        if (!inList) {
+          html += '<ul>';
+          inList = true;
+        }
+        html += `<li>${inline(line.replace(/^\s*([-*]|\d+\.)\s+/, ''))}</li>`;
+        return;
+      }
+      closeList();
+      if (line.trim().startsWith('>')) {
+        html += `<blockquote>${inline(line.replace(/^\s*>\s?/, ''))}</blockquote>`;
+        return;
+      }
+      if (line.trim().startsWith('|')) {
+        const cells = line.split('|').slice(1, -1).map(cell => inline(cell.trim()));
+        html += `<p>${cells.join(' · ')}</p>`;
+        return;
+      }
+      html += `<p>${inline(line)}</p>`;
+    });
+    closeList();
+    closeCode();
+    return html || '<p>No documentation text was returned.</p>';
+  }
+
+  function renderMarkdownOutput(markdown) {
+    if (dom.docRenderedOutput) dom.docRenderedOutput.innerHTML = renderMarkdownHtml(markdown);
+  }
+
+  function pdfBytesFromBase64(encoded) {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  function downloadPdfBytes(bytes, fileName) {
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1500);
+  }
+
+  function workDriveBody(raw) {
+    let body = raw;
+    const details = raw && raw.details;
+    if (details && typeof details === 'object') {
+      if (details.statusMessage !== undefined) body = details.statusMessage;
+      else if (details.output !== undefined) body = details.output;
     }
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch (_) { body = { message: body }; }
+    }
+    return body || {};
+  }
+
+  async function uploadPdfToWorkDrive(pdfBytes, fileName) {
+    const folderId = (dom.settingsWorkDriveFolder && dom.settingsWorkDriveFolder.value.trim()) || state.settings.workdriveFolder;
+    if (!folderId) {
+      return { ok: false, message: 'Set the WorkDrive folder id in Settings.' };
+    }
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.CONNECTION?.invoke) {
+      return { ok: false, message: 'Open this widget inside Zoho CRM so the PDF can be uploaded with workdrive_connection.' };
+    }
+    const conn = state.settings.workdriveConnection || 'workdrive_connection';
+    const file = new File([pdfBytes], fileName, { type: 'application/pdf' });
+    let raw;
+    try {
+      raw = await ZOHO.CRM.CONNECTION.invoke(conn, {
+        url: `${getZohoApiDomain()}/workdrive/api/v1/upload`,
+        method: 'POST',
+        param_type: 2,
+        parameters: {
+          parent_id: folderId,
+          filename: fileName,
+          'override-name-exist': 'true',
+          content: file
+        }
+      });
+    } catch (err) {
+      return { ok: false, message: err.message || String(err) };
+    }
+    const body = workDriveBody(raw);
+    const row = Array.isArray(body.data) ? body.data[0] : body.data;
+    const link = row?.attributes?.Permalink || row?.attributes?.permalink || '';
+    if (body.errors || body.status === 'error' || body.code === 'INVALID_OAUTHSCOPE' || body.code === 'AUTHENTICATION_FAILURE') {
+      const detail = body.message || body.errors?.[0]?.title || body.code || 'WorkDrive rejected the upload';
+      return { ok: false, message: `${detail}. Check WorkDrive.files.ALL on ${conn} and the folder id.` };
+    }
+    if (!row && !link) {
+      return { ok: false, message: 'WorkDrive did not confirm the file. The PDF was still downloaded.' };
+    }
+    return { ok: true, link, id: row?.id || '' };
+  }
+
+  async function deliverDocumentationPdf(markdown, title, pdfBase64) {
+    const safeTitle = String(title || 'Zoho_CRM_Documentation').replace(/[^\w.-]+/g, '_');
+    const fileName = `${safeTitle}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    let encoded = pdfBase64;
+    if (!encoded) {
+      const pdfResp = await apiCall('/pdf', { markdown });
+      encoded = pdfResp.pdf_base64;
+    }
+    if (!encoded) throw new Error('The PDF was not created.');
+    const bytes = pdfBytesFromBase64(encoded);
+    downloadPdfBytes(bytes, fileName);
+    const uploaded = await uploadPdfToWorkDrive(bytes, fileName);
+    if (uploaded.ok) {
+      showToast(uploaded.link ? `PDF downloaded and saved in WorkDrive: ${uploaded.link}` : 'PDF downloaded and uploaded to the WorkDrive folder.', 'success');
+    } else {
+      showToast(`PDF downloaded. ${uploaded.message}`, 'warning');
+    }
+    return uploaded;
   }
 
   function copyMarkdownToClipboard() {
@@ -1930,18 +2802,15 @@
     }
 
     dom.btnExportWorkDrive.disabled = true;
-    dom.btnExportWorkDrive.textContent = 'Uploading to WorkDrive...';
+    dom.btnExportWorkDrive.textContent = 'Creating PDF...';
 
     try {
-      const resp = await apiCall('/workdrive/export', {
-        title: 'Zoho_CRM_Living_System_Documentation',
-        folder_id: dom.settingsWorkDriveFolder?.value || 'folder_living_docs_crm',
-        markdown: state.generatedMarkdown
-      });
-
-      alert(`✅ Documentation exported to Zoho WorkDrive successfully!\nFile: ${resp.file_name || 'Zoho_System_Docs.pdf'}\nLink: ${resp.link || 'https://workdrive.zoho.com'}`);
+      await deliverDocumentationPdf(
+        state.generatedMarkdown,
+        'Zoho_CRM_Living_System_Documentation'
+      );
     } catch (err) {
-      alert('Export failed: ' + err.message);
+      showToast(err.message || 'Export failed', 'error');
     } finally {
       dom.btnExportWorkDrive.disabled = false;
       dom.btnExportWorkDrive.textContent = '☁️ Export to WorkDrive';
@@ -1956,7 +2825,10 @@
     dom.btnRunDriftCheck.innerHTML = '<span>Comparing Hashes...</span>';
 
     try {
-      const resp = await apiCall('/drift', {});
+      const resp = await apiCall('/drift', {
+        baseline: state.baselineSnapshot,
+        current: state.activeSnapshot
+      });
       const drift = resp.drift || resp;
       state.driftReport = drift;
 
@@ -1980,28 +2852,26 @@
           if (c.type.includes('added')) badgeClass = 'badge-green';
           if (c.type.includes('removed')) badgeClass = 'badge-red';
 
+          const sections = (drift.affected_sections || []).join(', ');
           rows += `
             <tr>
               <td><strong>${escapeHtml(c.module)}</strong></td>
               <td><span class="badge ${badgeClass}">${escapeHtml(c.type.replace(/_/g, ' '))}</span></td>
               <td><code>${escapeHtml(c.component_id)}</code></td>
               <td>${escapeHtml(c.detail)}</td>
-              <td><strong>${escapeHtml(drift.affected_sections.join(', '))}</strong></td>
+              <td><strong>${escapeHtml(sections)}</strong></td>
             </tr>
           `;
         });
         dom.driftChangesTableBody.innerHTML = rows;
 
-        // Populate Visual Diff View
-        dom.diffOldContent.innerHTML = `
-<span class="diff-del">- Field Dictionary: Deals (${state.activeSnapshot?.stats?.total_fields || 29} fields)</span>
-<span class="diff-del">- Workflow: High Value Alert (Amount >= $50k)</span>
-<span class="diff-del">- Document Version: Baseline (Clean)</span>`;
+        dom.diffOldContent.innerHTML = (drift.changes || []).map(c =>
+          `<div class="diff-del">- ${escapeHtml(c.module)}: ${escapeHtml(c.detail)}</div>`
+        ).join('');
 
-        dom.diffNewContent.innerHTML = `
-<span class="diff-add">+ Field Dictionary: Updated with added fields / attributes</span>
-<span class="diff-add">+ Workflow: High Value Alert criteria updated</span>
-<span class="diff-add">+ Document Version: Synced Baseline (v2.1)</span>`;
+        dom.diffNewContent.innerHTML = (drift.changes || []).map(c =>
+          `<div class="diff-add">+ ${escapeHtml(c.type.replace(/_/g, ' '))} on ${escapeHtml(c.module)}</div>`
+        ).join('');
 
         dom.driftChangesSection.style.display = 'block';
       } else {
@@ -2030,7 +2900,8 @@
 
     try {
       const resp = await apiCall('/regenerate', {
-        affected_components: state.driftReport?.changes?.map(c => c.component_id) || []
+        affected_components: state.driftReport?.changes?.map(c => c.component_id) || [],
+        snapshot: state.activeSnapshot
       });
 
       state.generatedMarkdown = resp.markdown;
@@ -2062,13 +2933,13 @@
     const loadingBubble = appendChatBubble('assistant', '<em>Analyzing CRM configuration snapshot...</em>');
 
     try {
-      const resp = await apiCall('/ask', { question: query });
+      const resp = await apiCall('/ask', {
+        question: query,
+        snapshot: state.activeSnapshot,
+        workflows: state.allWorkflowsList
+      });
       const answer = resp.answer || 'No answer received.';
-      if (typeof marked !== 'undefined') {
-        loadingBubble.innerHTML = marked.parse(answer);
-      } else {
-        loadingBubble.innerHTML = `<p>${escapeHtml(answer)}</p>`;
-      }
+      loadingBubble.innerHTML = renderMarkdownHtml(answer);
     } catch (err) {
       loadingBubble.innerHTML = `<p style="color:var(--danger);">Error: ${escapeHtml(err.message)}</p>`;
     } finally {
@@ -2113,7 +2984,7 @@
       dom.builderCodeOutput.textContent = result.code || '// Error generating code';
       
       if (result.documentation_markdown) {
-        dom.builderDocOutput.innerHTML = marked ? marked.parse(result.documentation_markdown) : result.documentation_markdown;
+        dom.builderDocOutput.innerHTML = renderMarkdownHtml(result.documentation_markdown || '');
         dom.builderAutoDocWrapper.style.display = 'block';
       }
     } catch (err) {
@@ -2159,56 +3030,73 @@
   // ==========================================
   async function saveSettings() {
     dom.btnSaveSettings.disabled = true;
-    dom.btnSaveSettings.textContent = 'Saving to Custom Module...';
+    dom.btnSaveSettings.textContent = 'Saving settings...';
 
     try {
       const docsConn = dom.settingsDocsAgentConn ? dom.settingsDocsAgentConn.value.trim() : state.settings.docsAgentConnection;
       const wdConn = dom.settingsWorkDriveConn ? dom.settingsWorkDriveConn.value.trim() : state.settings.workdriveConnection;
+      const typedKey = dom.settingsClaudeKey ? dom.settingsClaudeKey.value.trim() : '';
+      const freqEl = document.getElementById('settingsScheduleFreq');
 
       const payload = {
-        claudeApiKey: dom.settingsClaudeKey ? dom.settingsClaudeKey.value : '',
         claudeModel: dom.settingsClaudeModel ? dom.settingsClaudeModel.value : state.settings.claudeModel,
         workdriveDefaultFolder: dom.settingsWorkDriveFolder ? dom.settingsWorkDriveFolder.value : state.settings.workdriveFolder,
         docsAgentConnection: docsConn,
-        workdriveConnection: wdConn
+        workdriveConnection: wdConn,
+        scheduleFrequency: freqEl ? freqEl.value : (state.settings.scheduleFrequency || 'daily')
       };
+      if (typedKey) payload.claudeApiKey = typedKey;
 
-      // Update local state
       state.settings.docsAgentConnection = docsConn;
       state.settings.workdriveConnection = wdConn;
       state.settings.workdriveFolder = payload.workdriveDefaultFolder;
       state.settings.claudeModel = payload.claudeModel;
+      state.settings.scheduleFrequency = payload.scheduleFrequency;
+      if (typedKey) state.settings.claudeApiKey = typedKey;
 
-      const resp = await fetch('/api/settings', {
+      let crmNote = 'Saved on the local settings record.';
+      if (typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.API) {
+        const saved = await upsertSettingsRecord({
+          docsAgentConnection: docsConn,
+          workdriveConnection: wdConn,
+          claudeModel: payload.claudeModel,
+          workdriveFolder: payload.workdriveDefaultFolder,
+          claudeApiKey: typedKey,
+          scheduleFrequency: payload.scheduleFrequency
+        });
+        if (!saved.ok) {
+          throw new Error(saved.message || 'Could not write Living_Docs_Settings.');
+        }
+        payload.settingsRecordId = saved.id;
+        crmNote = saved.action === 'updated'
+          ? `Updated existing settings record ${saved.id}.`
+          : `Created the first settings record ${saved.id || ''}. Later saves will update this row.`;
+        renderSettingsRecordStatus();
+      }
+
+      await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      });
-      const data = await resp.json();
-      alert('✅ Settings saved to Living_Docs_Settings custom module!');
+      }).catch(() => null);
+
+      if (typedKey && dom.settingsClaudeKey) {
+        dom.settingsClaudeKey.value = '';
+        dom.settingsClaudeKey.placeholder = 'Saved — leave blank to keep';
+      }
+      showToast(crmNote, 'success');
     } catch (err) {
-      alert('Save error: ' + err.message);
+      showToast(err.message || 'Save failed', 'error');
     } finally {
       dom.btnSaveSettings.disabled = false;
-      dom.btnSaveSettings.textContent = '💾 Save Settings to Custom Module';
+      dom.btnSaveSettings.textContent = 'Save Settings';
     }
   }
 
-  async function triggerSimulation(scenario, label) {
-    try {
-      const resp = await fetch('/api/simulate-change', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenario })
-      });
-      const data = await resp.json();
-
-      alert(`🧪 [Demo Simulator]: ${label}\n\nSwitching to Drift Detection Radar to inspect changes...`);
-      await checkDrift();
-      switchTab('tab-drift');
-    } catch (err) {
-      alert('Simulation error: ' + err.message);
-    }
+  async function triggerSimulation() {
+    showToast('Drift compares live CRM scans. Run Scan CRM again after a real configuration change.', 'warning');
+    switchTab('tab-drift');
+    if (state.activeSnapshot) await checkDrift();
   }
 
   function escapeHtml(str) {

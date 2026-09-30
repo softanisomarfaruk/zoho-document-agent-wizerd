@@ -1,37 +1,43 @@
 /*
- * Zoho Living Documentation Agent - 100% Zero-Deluge Widget Controller
- * "Your Zoho system documents itself"
- *
- * Auto-provisions custom modules (Living_Docs_Settings + Living_Docs_Snapshots)
- * via Zoho CRM v8 API on launch — using Named Connections (no raw tokens).
- * Zero manual Deluge scripts required in CRM setup.
+ * Living Docs for Zoho CRM - widget controller
+ * Flow: setup check -> overview -> select workflows -> review criteria and code -> document -> save record and PDF to CRM
  */
 
 (function () {
   'use strict';
 
-  // ==========================================
-  // APPLICATION STATE
-  // ==========================================
   const state = {
     isZohoEmbedded: false,
-    activeSnapshot: null,
-    baselineSnapshot: null,
-    generatedMarkdown: null,
-    driftReport: null,
-    modulesProvisioned: false,
-    connectionsConfirmed: false,
+    settingsRecordId: null,
     settings: {
-      claudeModel: 'claude-3-5-sonnet-20241022',
-      workdriveFolder: 'folder_living_docs_crm',
+      workdriveFolder: '',
       docsAgentConnection: 'docsagent_connection',
       workdriveConnection: 'workdrive_connection'
     },
+    audience: localStorage.getItem('livingdocs.audience') || 'admin',
+    hasApiKey: false,
+    ai: { provider: '', label: '', apiUrl: '', model: '', hasApiKey: false, keyHint: '', configured: false },
+    aiKeys: { anthropic: '', cursor: '' },
+    aiProviders: {},
+    docLog: null,
+    currentUser: null,
+    step: 1,
+    maxStep: 1,
+    scanning: false,
+    crmModules: [],
+    allWorkflowsList: [],
+    functionCatalog: null,
+    functionCatalogError: '',
     selectedWorkflowIds: new Set(),
-    allWorkflowsList: []
+    reviewWorkflows: [],
+    activeReviewId: null,
+    reviewDocMode: 'details',
+    moduleFields: {},
+    fnReviews: {},
+    generated: null,
+    saved: null
   };
 
-  // DOM Elements Cache
   const dom = {};
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -40,648 +46,80 @@
     initApp();
   });
 
-  function initElements() {
-    // Nav Tabs
-    dom.navTabs = document.getElementById('mainNavTabs');
-    dom.tabBtns = document.querySelectorAll('.nav-tab-btn');
-    dom.tabPanes = document.querySelectorAll('.tab-pane');
-    dom.driftNavBadge = document.getElementById('driftNavBadge');
 
-    // Header Status Pills
-    dom.headerOrgPill = document.getElementById('headerOrgPill');
-    dom.headerOrgLabel = document.getElementById('headerOrgLabel');
-    dom.headerDriftPill = document.getElementById('headerDriftPill');
-    dom.headerDriftLabel = document.getElementById('headerDriftLabel');
-    dom.btnQuickScan = document.getElementById('btnQuickScan');
-
-    // Tab 1: Scan & Inventory
-    dom.btnRunFullScan = document.getElementById('btnRunFullScan');
-    dom.statModulesCount = document.getElementById('statModulesCount');
-    dom.statFieldsCount = document.getElementById('statFieldsCount');
-    dom.statWorkflowsCount = document.getElementById('statWorkflowsCount');
-    dom.statBlueprintsCount = document.getElementById('statBlueprintsCount');
-    dom.statFunctionsCount = document.getElementById('statFunctionsCount');
-    dom.inventoryTableBody = document.getElementById('inventoryTableBody');
-    dom.scanTimestampBadge = document.getElementById('scanTimestampBadge');
-    dom.btnProceedToDoc = document.getElementById('btnProceedToDoc');
-
-    // Workflow Rules Explorer & Selector
-    dom.workflowTableBody = document.getElementById('workflowTableBody');
-    dom.workflowTotalCountBadge = document.getElementById('workflowTotalCountBadge');
-    dom.workflowSelectedCountBadge = document.getElementById('workflowSelectedCountBadge');
-    dom.searchWorkflowInput = document.getElementById('searchWorkflowInput');
-    dom.filterWorkflowModule = document.getElementById('filterWorkflowModule');
-    dom.filterWorkflowStatus = document.getElementById('filterWorkflowStatus');
-    dom.btnRefreshWorkflows = document.getElementById('btnRefreshWorkflows');
-    dom.btnSelectAllWorkflows = document.getElementById('btnSelectAllWorkflows');
-    dom.btnDeselectAllWorkflows = document.getElementById('btnDeselectAllWorkflows');
-    dom.btnDocSelectedWorkflows = document.getElementById('btnDocSelectedWorkflows');
-    dom.btnDocSelectedCount = document.getElementById('btnDocSelectedCount');
-    dom.chkWorkflowHeaderAll = document.getElementById('chkWorkflowHeaderAll');
-    dom.statWorkflowsSub = document.getElementById('statWorkflowsSub');
-
-    // Workflow Detail Modal (API v8 get-a-workflow)
-    dom.workflowDetailModal = document.getElementById('workflowDetailModal');
-    dom.btnCloseWorkflowModal = document.getElementById('btnCloseWorkflowModal');
-    dom.btnFooterCloseWorkflowModal = document.getElementById('btnFooterCloseWorkflowModal');
-    dom.btnCopyModalJson = document.getElementById('btnCopyModalJson');
-    dom.btnModalDocWorkflow = document.getElementById('btnModalDocWorkflow');
-    dom.modalWorkflowName = document.getElementById('modalWorkflowName');
-    dom.modalWorkflowId = document.getElementById('modalWorkflowId');
-    dom.modalWfModule = document.getElementById('modalWfModule');
-    dom.modalWfStatus = document.getElementById('modalWfStatus');
-    dom.modalWfTrigger = document.getElementById('modalWfTrigger');
-    dom.modalWfSource = document.getElementById('modalWfSource');
-    dom.modalWfCreated = document.getElementById('modalWfCreated');
-    dom.modalWfModified = document.getElementById('modalWfModified');
-    dom.modalWfDesc = document.getElementById('modalWfDesc');
-    dom.modalWfCriteria = document.getElementById('modalWfCriteria');
-    dom.modalConditionsContainer = document.getElementById('modalConditionsContainer');
-    dom.modalRawJson = document.getElementById('modalRawJson');
-
-    // Tab 2: Living Docs Studio
-    dom.selectDocType = document.getElementById('selectDocType');
-    dom.selectAudience = document.getElementById('selectAudience');
-    dom.btnGenerateDocs = document.getElementById('btnGenerateDocs');
-    dom.docVersionBadge = document.getElementById('docVersionBadge');
-    dom.docModelBadge = document.getElementById('docModelBadge');
-    dom.docRenderedOutput = document.getElementById('docRenderedOutput');
-    dom.btnCopyMarkdown = document.getElementById('btnCopyMarkdown');
-    dom.btnDownloadMd = document.getElementById('btnDownloadMd');
-    dom.btnPrintPdf = document.getElementById('btnPrintPdf');
-    dom.btnExportWorkDrive = document.getElementById('btnExportWorkDrive');
-
-    // Tab 3: Drift Detection & Diff
-    dom.btnRunDriftCheck = document.getElementById('btnRunDriftCheck');
-    dom.btnTargetedRegenerate = document.getElementById('btnTargetedRegenerate');
-    dom.driftBannerAlert = document.getElementById('driftBannerAlert');
-    dom.driftBannerIcon = document.getElementById('driftBannerIcon');
-    dom.driftBannerTitle = document.getElementById('driftBannerTitle');
-    dom.driftBannerDesc = document.getElementById('driftBannerDesc');
-    dom.driftChangesSection = document.getElementById('driftChangesSection');
-    dom.driftChangesTableBody = document.getElementById('driftChangesTableBody');
-    dom.diffOldContent = document.getElementById('diffOldContent');
-    dom.diffNewContent = document.getElementById('diffNewContent');
-
-    // Tab 4: Ask AI Assistant
-    dom.chatMessages = document.getElementById('chatMessages');
-    dom.chatInputField = document.getElementById('chatInputField');
-    dom.btnSendChat = document.getElementById('btnSendChat');
-    dom.promptChips = document.querySelectorAll('.prompt-chip');
-
-    // Tab 5: Function Builder
-    dom.builderModule = document.getElementById('builderModule');
-    dom.builderTrigger = document.getElementById('builderTrigger');
-    dom.builderPrompt = document.getElementById('builderPrompt');
-    dom.btnGenerateFunction = document.getElementById('btnGenerateFunction');
-    dom.builderFunctionTitle = document.getElementById('builderFunctionTitle');
-    dom.builderSafetyBadge = document.getElementById('builderSafetyBadge');
-    dom.builderCodeOutput = document.getElementById('builderCodeOutput');
-    dom.btnCopyDelugeCode = document.getElementById('btnCopyDelugeCode');
-    dom.builderAutoDocWrapper = document.getElementById('builderAutoDocWrapper');
-    dom.builderDocOutput = document.getElementById('builderDocOutput');
-    dom.btnDeployFunction = document.getElementById('btnDeployFunction');
-
-    // Tab 6: Settings & Connection Governance
-    dom.settingsClaudeKey = document.getElementById('settingsClaudeKey');
-    dom.settingsClaudeModel = document.getElementById('settingsClaudeModel');
-    dom.settingsWorkDriveFolder = document.getElementById('settingsWorkDriveFolder');
-    dom.settingsDocsAgentConn = document.getElementById('settingsDocsAgentConn');
-    dom.settingsWorkDriveConn = document.getElementById('settingsWorkDriveConn');
-    dom.btnSaveSettings = document.getElementById('btnSaveSettings');
-    dom.btnVerifyModulesNow = document.getElementById('btnVerifyModulesNow');
-    dom.btnOpenSetupWizard = document.getElementById('btnOpenSetupWizard');
-    dom.btnSimFieldChange = document.getElementById('btnSimFieldChange');
-    dom.btnSimWorkflowChange = document.getElementById('btnSimWorkflowChange');
-    dom.btnSimBlueprintChange = document.getElementById('btnSimBlueprintChange');
-    dom.btnSimReset = document.getElementById('btnSimReset');
-  }
-
-  function bindEvents() {
-    // Nav Tab Switcher
-    dom.tabBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        const targetTab = btn.getAttribute('data-tab');
-        switchTab(targetTab);
+  // Console helpers. Select the widget iframe as the DevTools console context, then e.g.:
+  //   await DocsAgentDebug.env()
+  //   await DocsAgentDebug.modules()
+  //   await DocsAgentDebug.workflows()
+  //   await DocsAgentDebug.workflow('4876876000011070001')
+  //   await DocsAgentDebug.get('/crm/v8/settings/automation/workflow_rules?module=Leads')
+  window.DocsAgentDebug = {
+    env() {
+      const info = {
+        isZohoEmbedded: state.isZohoEmbedded,
+        sdkLoaded: typeof ZOHO !== 'undefined',
+        connectionInvokeAvailable: typeof ZOHO !== 'undefined' && !!ZOHO.CRM?.CONNECTION?.invoke,
+        connectionName: state.settings.docsAgentConnection,
+        apiDomain: getZohoApiDomain(),
+        referrer: document.referrer,
+        location: window.location.href
+      };
+      console.table(info);
+      return info;
+    },
+    async get(endpoint, connName) {
+      const conn = connName || state.settings.docsAgentConnection;
+      const raw = await ZOHO.CRM.CONNECTION.invoke(conn, {
+        url: endpoint.startsWith('http') ? endpoint : getZohoApiDomain() + endpoint,
+        method: 'GET',
+        param_type: 1,
+        headers: {}
       });
-    });
-
-    // Scanner
-    dom.btnRunFullScan.addEventListener('click', runFullScan);
-    dom.btnQuickScan.addEventListener('click', () => {
-      switchTab('tab-inventory');
-      runFullScan();
-    });
-    dom.btnProceedToDoc.addEventListener('click', () => {
-      switchTab('tab-docs');
-      if (!state.generatedMarkdown) {
-        generateDocs();
-      }
-    });
-
-    // Workflow Explorer & AI Documentation Selector
-    if (dom.searchWorkflowInput) {
-      dom.searchWorkflowInput.addEventListener('input', filterAndRenderWorkflows);
-    }
-    if (dom.filterWorkflowModule) {
-      dom.filterWorkflowModule.addEventListener('change', filterAndRenderWorkflows);
-    }
-    if (dom.filterWorkflowStatus) {
-      dom.filterWorkflowStatus.addEventListener('change', filterAndRenderWorkflows);
-    }
-    if (dom.btnRefreshWorkflows) {
-      dom.btnRefreshWorkflows.addEventListener('click', refreshWorkflowsOnly);
-    }
-    if (dom.btnSelectAllWorkflows) {
-      dom.btnSelectAllWorkflows.addEventListener('click', () => {
-        state.allWorkflowsList.forEach(w => state.selectedWorkflowIds.add(w.id));
-        updateWorkflowSelectionUI();
-      });
-    }
-    if (dom.btnDeselectAllWorkflows) {
-      dom.btnDeselectAllWorkflows.addEventListener('click', () => {
-        state.selectedWorkflowIds.clear();
-        updateWorkflowSelectionUI();
-      });
-    }
-    if (dom.chkWorkflowHeaderAll) {
-      dom.chkWorkflowHeaderAll.addEventListener('change', (e) => {
-        const isChecked = e.target.checked;
-        const visibleWfs = getVisibleWorkflows();
-        visibleWfs.forEach(w => {
-          if (isChecked) state.selectedWorkflowIds.add(w.id);
-          else state.selectedWorkflowIds.delete(w.id);
-        });
-        updateWorkflowSelectionUI();
-      });
-    }
-    if (dom.btnDocSelectedWorkflows) {
-      dom.btnDocSelectedWorkflows.addEventListener('click', () => {
-        documentSelectedWorkflows();
-      });
-    }
-
-    // Workflow Detail Modal Events
-    if (dom.btnCloseWorkflowModal) {
-      dom.btnCloseWorkflowModal.addEventListener('click', closeWorkflowModal);
-    }
-    if (dom.btnFooterCloseWorkflowModal) {
-      dom.btnFooterCloseWorkflowModal.addEventListener('click', closeWorkflowModal);
-    }
-    if (dom.btnCopyModalJson) {
-      dom.btnCopyModalJson.addEventListener('click', copyModalJson);
-    }
-    if (dom.btnModalDocWorkflow) {
-      dom.btnModalDocWorkflow.addEventListener('click', () => {
-        if (state.currentModalWorkflowId) {
-          const id = state.currentModalWorkflowId;
-          closeWorkflowModal();
-          state.selectedWorkflowIds.clear();
-          state.selectedWorkflowIds.add(id);
-          updateWorkflowSelectionUI();
-          documentSelectedWorkflows();
-        }
-      });
-    }
-    if (dom.workflowDetailModal) {
-      dom.workflowDetailModal.addEventListener('click', (e) => {
-        if (e.target === dom.workflowDetailModal) closeWorkflowModal();
-      });
-    }
-    document.querySelectorAll('.wf-modal-tab-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const tabKey = btn.getAttribute('data-modaltab');
-        switchModalTab(tabKey);
-      });
-    });
-
-    // Document Generator
-    dom.btnGenerateDocs.addEventListener('click', generateDocs);
-    dom.btnCopyMarkdown.addEventListener('click', copyMarkdownToClipboard);
-    dom.btnDownloadMd.addEventListener('click', downloadMarkdownFile);
-    dom.btnPrintPdf.addEventListener('click', () => window.print());
-    dom.btnExportWorkDrive.addEventListener('click', exportToWorkDrive);
-
-    // Drift Detection
-    dom.btnRunDriftCheck.addEventListener('click', checkDrift);
-    dom.btnTargetedRegenerate.addEventListener('click', targetedRegenerate);
-
-    // Ask AI
-    if (dom.btnSendChat) dom.btnSendChat.addEventListener('click', sendChatMessage);
-    if (dom.chatInputField) {
-      dom.chatInputField.addEventListener('keydown', e => {
-        if (e.key === 'Enter') sendChatMessage();
-      });
-    }
-    if (dom.promptChips) {
-      dom.promptChips.forEach(chip => {
-        chip.addEventListener('click', () => {
-          const query = chip.getAttribute('data-query');
-          if (dom.chatInputField) dom.chatInputField.value = query;
-          sendChatMessage();
-        });
-      });
-    }
-
-    // Function Builder
-    if (dom.btnGenerateFunction) dom.btnGenerateFunction.addEventListener('click', generateFunction);
-    if (dom.btnCopyDelugeCode) dom.btnCopyDelugeCode.addEventListener('click', copyDelugeCode);
-    if (dom.btnDeployFunction) dom.btnDeployFunction.addEventListener('click', deployFunction);
-
-    // Settings & Connection Governance
-    dom.btnSaveSettings.addEventListener('click', saveSettings);
-    dom.btnVerifyModulesNow.addEventListener('click', () => autoProvisionCustomModules(true));
-    if (dom.btnOpenSetupWizard) {
-      dom.btnOpenSetupWizard.addEventListener('click', () => showOnboardingView(true));
-    }
-
-    // 3-Step Full-Page Onboarding Navigation
-    const btnWizGoToVerify = document.getElementById('btnWizGoToVerify');
-    if (btnWizGoToVerify) {
-      btnWizGoToVerify.addEventListener('click', startConnectionVerification);
-    }
-    const btnWizSkipToApp = document.getElementById('btnWizSkipToApp');
-    if (btnWizSkipToApp) {
-      btnWizSkipToApp.addEventListener('click', continueAfterSetup);
-    }
-    const btnWizRetryVerify = document.getElementById('btnWizRetryVerify');
-    if (btnWizRetryVerify) {
-      btnWizRetryVerify.addEventListener('click', () => {
-        const docsConn = (document.getElementById('wizConnDocsAgent')?.value || 'docsagent_connection').trim();
-        const wdConn = (document.getElementById('wizConnWorkDrive')?.value || 'workdrive_connection').trim();
-        runConnectionVerification(docsConn, wdConn);
-      });
-    }
-    const btnWizBackToStep1 = document.getElementById('btnWizBackToStep1');
-    if (btnWizBackToStep1) {
-      btnWizBackToStep1.addEventListener('click', () => openWizardStep(1));
-    }
-    const btnWizProceedToProvision = document.getElementById('btnWizProceedToProvision');
-    if (btnWizProceedToProvision) {
-      btnWizProceedToProvision.addEventListener('click', runStep3Provision);
-    }
-    const btnWizEnterApp = document.getElementById('btnWizEnterApp');
-    if (btnWizEnterApp) {
-      btnWizEnterApp.addEventListener('click', continueAfterSetup);
-    }
-    const btnOnboardingBackToApp = document.getElementById('btnOnboardingBackToApp');
-    if (btnOnboardingBackToApp) {
-      btnOnboardingBackToApp.addEventListener('click', showMainAppView);
-    }
-
-    // Live Demo Simulation
-    dom.btnSimFieldChange.addEventListener('click', () => triggerSimulation('add_lead_field', 'Added VIP Customer Tier field to Leads.'));
-    dom.btnSimWorkflowChange.addEventListener('click', () => triggerSimulation('modify_deal_workflow', 'Updated Deal High Value workflow criteria and actions.'));
-    dom.btnSimBlueprintChange.addEventListener('click', () => triggerSimulation('add_blueprint_transition', 'Added Fast Track transition to Deal Blueprint.'));
-    dom.btnSimReset.addEventListener('click', () => triggerSimulation('reset', 'Restored pristine baseline.'));
-  }
-
-  // ==========================================
-  // FULL-PAGE ONBOARDING & CONNECTION VIEW
-  // ==========================================
-
-  function showOnboardingView(fromSettings = false) {
-    const mainApp = document.getElementById('mainAppView');
-    const onboarding = document.getElementById('onboardingPageView');
-    const backBtn = document.getElementById('btnOnboardingBackToApp');
-
-    if (mainApp) mainApp.style.display = 'none';
-    if (onboarding) onboarding.style.display = 'block';
-    if (backBtn) backBtn.style.display = fromSettings ? 'inline-flex' : 'none';
-
-    openWizardStep(1);
-
-    // Pre-fill inputs from state
-    const da = document.getElementById('wizConnDocsAgent');
-    const wd = document.getElementById('wizConnWorkDrive');
-    const wdf = document.getElementById('wizWorkDriveFolder');
-    if (da) da.value = state.settings.docsAgentConnection || 'docsagent_connection';
-    if (wd) wd.value = state.settings.workdriveConnection || 'workdrive_connection';
-    if (wdf) wdf.value = state.settings.workdriveFolder || 'folder_living_docs_crm';
-
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  function showMainAppView() {
-    const mainApp = document.getElementById('mainAppView');
-    const onboarding = document.getElementById('onboardingPageView');
-
-    if (onboarding) onboarding.style.display = 'none';
-    if (mainApp) mainApp.style.display = 'block';
-
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  // --- Step Switcher ---
-  function openWizardStep(step) {
-    [1, 2, 3].forEach(n => {
-      const el = document.getElementById(`wizStep${n}`);
-      if (el) el.classList.toggle('active', n === step);
-    });
-    [1, 2, 3].forEach(n => {
-      const el = document.getElementById(`wizProg${n}`);
-      if (!el) return;
-      el.classList.remove('active', 'done');
-      if (n < step) el.classList.add('done');
-      else if (n === step) el.classList.add('active');
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  // --- Step 1 → Step 2: Start Verification ---
-  async function startConnectionVerification() {
-    const docsConn = (document.getElementById('wizConnDocsAgent')?.value || 'docsagent_connection').trim();
-    const wdConn = (document.getElementById('wizConnWorkDrive')?.value || 'workdrive_connection').trim();
-    const claudeKey = (document.getElementById('wizClaudeKey')?.value || '').trim();
-    const wdFolder = (document.getElementById('wizWorkDriveFolder')?.value || 'folder_living_docs_crm').trim();
-
-    state.settings.docsAgentConnection = docsConn;
-    state.settings.workdriveConnection = wdConn;
-    state.settings.workdriveFolder = wdFolder;
-    state._pendingClaudeKey = claudeKey;
-
-    const dnEl = document.getElementById('verifyNameDocsAgent');
-    const wdnEl = document.getElementById('verifyNameWorkDrive');
-    if (dnEl) dnEl.textContent = docsConn;
-    if (wdnEl) wdnEl.textContent = wdConn;
-
-    openWizardStep(2);
-
-    setConnVerifyUI('docsagent', 'checking', '⏳', `Invoking Named Connection "${docsConn}" via Zoho SDK...`);
-    setConnVerifyUI('workdrive', 'checking', '⏳', 'Waiting...');
-    const errDiv = document.getElementById('wizVerifyError');
-    if (errDiv) errDiv.style.display = 'none';
-    const procBtn = document.getElementById('btnWizProceedToProvision');
-    if (procBtn) procBtn.style.display = 'none';
-
-    await runConnectionVerification(docsConn, wdConn);
-  }
-
-  function setConnVerifyUI(which, statusState, icon, statusMsg) {
-    const idSuffix = which === 'docsagent' ? 'DocsAgent' : 'WorkDrive';
-    const itemEl = document.getElementById(`verifyItem${idSuffix}`);
-    const iconEl = document.getElementById(`verifyIcon${idSuffix}`);
-    const statusEl = document.getElementById(`verifyStatus${idSuffix}`);
-    if (itemEl) { itemEl.className = `verify-conn-item ${statusState}`; }
-    if (iconEl) iconEl.textContent = icon;
-    if (statusEl) statusEl.textContent = statusMsg;
-  }
-
-  // --- ACTUAL LIVE CONNECTION VERIFICATION ---
-  async function runConnectionVerification(docsConn, wdConn) {
-    let docsOk = false;
-    let wdOk = false;
-
-    // ---- TEST 1: docsagent_connection (CRM API access via Named Connection) ----
-    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM) {
-      try {
-        setConnVerifyUI('docsagent', 'checking', '⏳', `Testing Named Connection "${docsConn}" via Zoho CRM API...`);
-        let modulesCount = 0;
-
-        try {
-          const modResp = await invokeZohoConnectionAPI(docsConn, {
-            endpoint: '/crm/v8/settings/modules',
-            method: 'GET'
-          });
-          const mods = modResp?.modules || modResp?.data || [];
-          if (Array.isArray(mods) && mods.length > 0) {
-            modulesCount = mods.length;
-          }
-        } catch (connErr) {
-          console.warn('[invokeZohoConnectionAPI verification notice]:', connErr);
-        }
-
-        // Fallback to ZOHO.CRM.META.getModules()
-        if (modulesCount === 0 && ZOHO.CRM.META && ZOHO.CRM.META.getModules) {
-          try {
-            const metaResp = await ZOHO.CRM.META.getModules();
-            if (metaResp && metaResp.modules && metaResp.modules.length > 0) {
-              modulesCount = metaResp.modules.length;
-            }
-          } catch (_) {}
-        }
-
-        if (modulesCount > 0) {
-          setConnVerifyUI('docsagent', 'success', '✅', `CRM access verified. Found ${modulesCount} modules via ${docsConn}.`);
-          docsOk = true;
-        } else {
-          setConnVerifyUI('docsagent', 'success', '✅', `Named connection "${docsConn}" authenticated and active.`);
-          docsOk = true;
-        }
-      } catch (e) {
-        setConnVerifyUI('docsagent', 'error', '❌', `Connection error: ${e.message || e}. Check scopes: ZohoCRM.modules.ALL, ZohoCRM.modules.All, ZohoCRM.org.READ, ZohoCRM.settings.ALL, ZohoCRM.settings.functions.ALL, ZohoCRM.settings.READ.`);
-      }
-    } else {
-      // Standalone/Local mode
-      setConnVerifyUI('docsagent', 'success', '✅', `Standalone mode: ${docsConn} recorded.`);
-      docsOk = true;
-    }
-
-    // ---- TEST 2: workdrive_connection ----
-    await new Promise(r => setTimeout(r, 400));
-    if (wdConn && wdConn.length > 2) {
-      setConnVerifyUI('workdrive', 'success', '✅', `WorkDrive connection link name "${wdConn}" verified.`);
-      wdOk = true;
-    } else {
-      setConnVerifyUI('workdrive', 'error', '❌', 'WorkDrive connection name appears invalid.');
-    }
-
-    // ---- Show proceed button if both pass ----
-    const calloutEl = document.getElementById('wizVerifyCallout');
-    const calloutTextEl = document.getElementById('wizVerifyCalloutText');
-    const procBtn = document.getElementById('btnWizProceedToProvision');
-    const errDiv = document.getElementById('wizVerifyError');
-
-    if (docsOk && wdOk) {
-      if (calloutEl) calloutEl.className = 'status-callout success';
-      if (calloutTextEl) calloutTextEl.textContent = '✅ Both connections verified successfully! Click below to provision Custom Modules and Fields.';
-      if (procBtn) procBtn.style.display = 'inline-flex';
-      if (errDiv) errDiv.style.display = 'none';
-    } else {
-      if (calloutEl) calloutEl.className = 'status-callout warning';
-      if (calloutTextEl) calloutTextEl.textContent = 'One or more connections could not be verified.';
-      if (errDiv) errDiv.style.display = 'block';
-      if (procBtn) procBtn.style.display = 'none';
-    }
-  }
-
-  // --- Step 2 → Step 3: Provision Modules, Fields & Save Record ---
-  async function runStep3Provision() {
-    openWizardStep(3);
-    const log = createProvisionLogger();
-
-    log('⏳ Starting Zoho CRM v8 Custom Modules & Fields auto-provisioning...');
-
-    const settingsPayload = {
-      claudeApiKey: state._pendingClaudeKey || '',
-      claudeModel: state.settings.claudeModel,
-      workdriveDefaultFolder: state.settings.workdriveFolder,
-      docsAgentConnection: state.settings.docsAgentConnection,
-      workdriveConnection: state.settings.workdriveConnection
-    };
-
-    // Auto-provision via Zoho API v8
-    await autoProvisionCustomModules(true, log);
-
-    // Save to server backup
-    try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settingsPayload)
-      });
-      log('✅ Settings synced to backend backup.', 'ok');
-    } catch (e) {
-      log('ℹ️ Local server unreachable. Working in embedded mode.', 'warn');
-    }
-
-    state.connectionsConfirmed = true;
-
-    // Update settings tab fields
-    if (dom.settingsDocsAgentConn) dom.settingsDocsAgentConn.value = settingsPayload.docsAgentConnection;
-    if (dom.settingsWorkDriveConn) dom.settingsWorkDriveConn.value = settingsPayload.workdriveConnection;
-    if (dom.settingsWorkDriveFolder) dom.settingsWorkDriveFolder.value = settingsPayload.workdriveDefaultFolder;
-
-    // Show Done Action
-    const doneRow = document.getElementById('wizStep3DoneRow');
-    if (doneRow) doneRow.style.display = 'block';
-    log('🚀 Custom modules, custom fields, and configuration are 100% active!', 'ok');
-  }
-
-  // Creates a logger that writes to both console and the UI provision log
-  function createProvisionLogger() {
-    const logEl = document.getElementById('wizProvisionLog');
-    const updateModCard = (moduleApiName, status, msg) => {
-      const cardId = moduleApiName.includes('Settings') ? 'modCardSettings' : 'modCardSnapshots';
-      const statusId = moduleApiName.includes('Settings') ? 'modStatusSettings' : 'modStatusSnapshots';
-      const card = document.getElementById(cardId);
-      const statusEl = document.getElementById(statusId);
-      if (card) card.className = `module-provision-card ${status === 'ok' ? 'exists' : 'creating'}`;
-      if (statusEl) statusEl.textContent = msg;
-    };
-
-    return function log(msg, type = 'info') {
-      console.log('[WizardProvision]', msg);
-      if (!logEl) return;
-      const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      const line = document.createElement('div');
-      line.className = 'provision-log-line';
-      line.innerHTML = `<span class="log-ts">[${ts}]</span><span class="log-msg ${type}">${msg}</span>`;
-      logEl.appendChild(line);
-      logEl.scrollTop = logEl.scrollHeight;
-
-      if (msg.includes('Living_Docs_Settings')) updateModCard('Living_Docs_Settings', msg.includes('✅') ? 'ok' : 'creating', msg);
-      if (msg.includes('Living_Docs_Snapshots')) updateModCard('Living_Docs_Snapshots', msg.includes('✅') ? 'ok' : 'creating', msg);
-    };
-  }
-
-  // --- Check if connections are already configured in Living_Docs_Settings ---
-  async function checkConnectionSetupStatus() {
-    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.API) {
-      try {
-        const resp = await ZOHO.CRM.API.getAllRecords({
-          Entity: 'Living_Docs_Settings',
-          sort_order: 'desc',
-          per_page: 1
-        });
-        if (resp && resp.data && resp.data.length > 0) {
-          const cfg = resp.data[0];
-          if (cfg.Docs_Agent_Connection && cfg.Workdrive_Connection) {
-            state.settings.docsAgentConnection = cfg.Docs_Agent_Connection;
-            state.settings.workdriveConnection = cfg.Workdrive_Connection;
-            state.settings.claudeModel = cfg.Claude_Model || state.settings.claudeModel;
-            state.settings.workdriveFolder = cfg.Workdrive_Folder_Id || state.settings.workdriveFolder;
-            state.connectionsConfirmed = true;
-            console.log('[Setup] Connections loaded from Living_Docs_Settings module.');
-            return true;
-          }
-        }
-      } catch (e) {
-        console.log('[Setup] Living_Docs_Settings not found or empty. First-time setup required.', e.message);
-      }
-      return false;
-    }
-
-    // Standalone mode: check server
-    try {
-      const resp = await fetch('/api/settings');
-      const data = await resp.json();
-      if (data.settings && data.settings.docsAgentConnection) {
-        state.settings = { ...state.settings, ...data.settings };
-        state.connectionsConfirmed = true;
-        return true;
-      }
-    } catch (e) {
-      console.log('[Setup] Server not reachable. Using defaults.');
-    }
-    return false;
-  }
-
-  // ==========================================
-  // APP INITIALIZATION
-  // ==========================================
-  async function initApp() {
-    if (typeof ZOHO !== 'undefined' && ZOHO.embeddedApp) {
-      ZOHO.embeddedApp.on('PageLoad', async () => {
-        state.isZohoEmbedded = true;
-        dom.headerOrgLabel.textContent = 'Zoho CRM: Connected';
-        await runStartupSequence();
-      });
-      ZOHO.embeddedApp.init().catch(async () => {
-        state.isZohoEmbedded = false;
-        await runStartupSequence();
-      });
-    } else {
-      await runStartupSequence();
-    }
-  }
-
-  // Main startup sequence — runs AFTER ZOHO SDK is ready
-  async function runStartupSequence() {
-    const alreadySetup = await checkConnectionSetupStatus();
-
-    if (!alreadySetup) {
-      showOnboardingView(false);
-      return;
-    }
-
-    showMainAppView();
-
-    if (dom.settingsDocsAgentConn) dom.settingsDocsAgentConn.value = state.settings.docsAgentConnection;
-    if (dom.settingsWorkDriveConn) dom.settingsWorkDriveConn.value = state.settings.workdriveConnection;
-    if (dom.settingsWorkDriveFolder) dom.settingsWorkDriveFolder.value = state.settings.workdriveFolder;
-    if (dom.settingsClaudeModel) dom.settingsClaudeModel.value = state.settings.claudeModel;
-
-    await autoProvisionCustomModules();
-    await runFullScan();
-  }
-
-  // Called after onboarding completion
-  async function continueAfterSetup() {
-    showMainAppView();
-    await runFullScan();
-  }
-
-  function switchTab(tabId) {
-    dom.tabBtns.forEach(btn => {
-      btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
-    });
-    dom.tabPanes.forEach(pane => {
-      pane.classList.toggle('active', pane.id === tabId);
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  // Unified API Call Wrapper
-  async function apiCall(endpoint, payload = {}) {
-    const url = `/api${endpoint}`;
-    const res = await fetch(url, {
-      method: payload && Object.keys(payload).length > 0 ? 'POST' : 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload && Object.keys(payload).length > 0 ? JSON.stringify(payload) : undefined
-    });
-    return await res.json();
-  }
+      const body = unwrapConnectionResponse(raw);
+      console.log('raw', raw);
+      console.log('body', body);
+      return body;
+    },
+    async modules() {
+      const mods = await fetchCrmModules(state.settings.docsAgentConnection);
+      console.table(mods.map(m => ({
+        api_name: m.api_name,
+        label: m.plural_label,
+        generated_type: m.generated_type,
+        api_supported: m.api_supported,
+        visible: m.visible,
+        scanned: isScannableModule(m)
+      })));
+      return mods;
+    },
+    async sdkModules() {
+      const resp = await ZOHO.CRM.META.getModules();
+      console.log(resp);
+      return resp;
+    },
+    async workflows({ details = false } = {}) {
+      const conn = state.settings.docsAgentConnection;
+      let rules = await fetchAllWorkflowRulePages(conn);
+      if (details) rules = await enrichWorkflowRules(conn, rules);
+      console.table(rules.map(r => ({
+        id: r.id,
+        name: r.name,
+        module: workflowModuleName(r),
+        trigger: r.execute_when?.type,
+        active: r.status?.active,
+        conditions: Array.isArray(r.conditions) ? r.conditions.length : '-'
+      })));
+      return rules;
+    },
+    async workflow(id) {
+      const body = await crmGet(`/crm/v8/settings/automation/workflow_rules/${encodeURIComponent(id)}`);
+      console.log(body);
+      return body.workflow_rules?.[0] || body;
+    },
+    rescan: () => scanCrm(true),
+    get history() { return debugHistory; },
+    get state() { return state; }
+  };
 
   // ==========================================
   // ZOHO API & CONNECTION HELPER UTILITIES
@@ -753,24 +191,90 @@
       reqConfig.body = typeof payload === 'string' ? payload : JSON.stringify(payload);
     }
 
-    console.log(`[NamedConnection:${connName}] ${method} ${fullUrl}`, reqConfig);
-    const rawResp = await ZOHO.CRM.CONNECTION.invoke(connName, reqConfig);
-    console.log(`[NamedConnection:${connName}] Response:`, rawResp);
-
-    let parsed = rawResp;
-    if (rawResp?.details?.output) {
-      parsed = rawResp.details.output;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch (_) {}
-      }
-    } else if (rawResp?.result) {
-      parsed = rawResp.result;
-      if (typeof parsed === 'string') {
-        try { parsed = JSON.parse(parsed); } catch (_) {}
-      }
+    const startedAt = Date.now();
+    let rawResp;
+    try {
+      rawResp = await ZOHO.CRM.CONNECTION.invoke(connName, reqConfig);
+    } catch (sdkErr) {
+      debugLog('error', connName, method, fullUrl, { request: reqConfig, error: sdkErr, ms: Date.now() - startedAt });
+      throw new Error(`CONNECTION.invoke("${connName}") failed: ${describeSdkError(sdkErr)}`);
     }
-
+    const parsed = unwrapConnectionResponse(rawResp);
+    const apiErr = zohoApiError(parsed);
+    debugLog(apiErr ? 'warn' : 'ok', connName, method, fullUrl, { request: reqConfig, raw: rawResp, body: parsed, ms: Date.now() - startedAt });
     return parsed;
+  }
+
+  // CONNECTION.invoke wraps the CRM REST body in details.statusMessage (object or JSON string).
+  // FUNCTIONS.execute uses details.output, so both are accepted.
+  function unwrapConnectionResponse(rawResp) {
+    let body = rawResp;
+    const details = rawResp && rawResp.details;
+    if (details && typeof details === 'object') {
+      if (Object.prototype.hasOwnProperty.call(details, 'statusMessage')) body = details.statusMessage;
+      else if (Object.prototype.hasOwnProperty.call(details, 'output')) body = details.output;
+      else if (Object.prototype.hasOwnProperty.call(details, 'response')) body = details.response;
+    } else if (rawResp && rawResp.result !== undefined) {
+      body = rawResp.result;
+    }
+    if (typeof body === 'string') {
+      const trimmed = body.trim();
+      if (!trimmed) return {};
+      try { body = JSON.parse(trimmed); } catch (_) { body = { raw_text: body }; }
+    }
+    return body == null ? {} : body;
+  }
+
+  function zohoApiError(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    const code = body.code || '';
+    const failed = body.status === 'error' || /SCOPE|PERMISSION|AUTHORIZ|INVALID|NOT_SUPPORTED|MISSING|INTERNAL_ERROR|NO_CONNECTION/i.test(code);
+    if (!code || !failed) return null;
+    return { code, message: body.message || code, details: body.details || null };
+  }
+
+  function describeSdkError(err) {
+    if (!err) return 'unknown error';
+    if (typeof err === 'string') return err;
+    if (err.message) return err.code ? `${err.code}: ${err.message}` : err.message;
+    try { return JSON.stringify(err); } catch (_) { return String(err); }
+  }
+
+  function withHardTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+      Promise.resolve(promise).then(
+        (val) => { clearTimeout(timer); resolve(val); },
+        (err) => { clearTimeout(timer); reject(err instanceof Error ? err : new Error(describeSdkError(err))); }
+      );
+    });
+  }
+
+  // GET through the named connection; throws with the CRM error code instead of returning an error body.
+  async function crmGet(endpoint, { connName, timeoutMs = 20000, allowCodes = [] } = {}) {
+    const conn = connName || state.settings.docsAgentConnection || 'docsagent_connection';
+    const body = await withHardTimeout(invokeZohoConnectionAPI(conn, { endpoint, method: 'GET' }), timeoutMs, `GET ${endpoint}`);
+    const apiErr = zohoApiError(body);
+    if (apiErr && !allowCodes.includes(apiErr.code)) {
+      const err = new Error(`GET ${endpoint} → ${apiErr.code}: ${apiErr.message} (connection "${conn}")`);
+      err.code = apiErr.code;
+      err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  const debugHistory = [];
+  function debugLog(level, connName, method, url, info) {
+    debugHistory.push({ at: new Date().toISOString(), level, connName, method, url, ...info });
+    if (debugHistory.length > 100) debugHistory.shift();
+    const tag = level === 'ok' ? '✅' : level === 'warn' ? '⚠️' : '❌';
+    console.groupCollapsed(`[DocsAgent] ${tag} ${method} ${url} (${connName}, ${info.ms}ms)`);
+    console.log('request', info.request);
+    if (info.raw !== undefined) console.log('raw CONNECTION.invoke response', info.raw);
+    if (info.body !== undefined) console.log('unwrapped CRM body', info.body);
+    if (info.error !== undefined) console.error('error', info.error);
+    console.groupEnd();
   }
 
   async function getActiveProfileIds(docsConn, log = console.log) {
@@ -835,10 +339,337 @@
     return result;
   }
 
+  function hostedOnZohoStatic() {
+    return /(^|\.)zappsusercontent\.com$|(^|\.)zappscontents\.com$/i.test(location.hostname || '');
+  }
+
+  function refreshAiFromKeys() {
+    const provider = state.ai.provider;
+    const key = (provider && state.aiKeys[provider]) || '';
+    const preset = AI_PROVIDER_DEFAULTS[provider] || {};
+    if (!state.ai.apiUrl && preset.apiUrl) state.ai.apiUrl = preset.apiUrl;
+    if (!state.ai.model && preset.model) state.ai.model = preset.model;
+    if (!state.ai.label && preset.label) state.ai.label = preset.label;
+    if (key) {
+      state.ai.hasApiKey = true;
+      state.ai.keyHint = key.slice(-4);
+      state.ai.configured = Boolean(provider && state.ai.apiUrl && state.ai.model);
+      state.hasApiKey = state.ai.configured;
+    } else if (state.clearAiKey) {
+      state.ai.hasApiKey = false;
+      state.ai.keyHint = '';
+      state.ai.configured = false;
+      state.hasApiKey = false;
+    }
+  }
+
+  function applyRecordAi(record) {
+    if (!record) return;
+    const claude = String(record.Claude_API_Key || '').trim();
+    const cursor = String(record.Cursor_API_Key || '').trim();
+    if (claude) state.aiKeys.anthropic = claude;
+    if (cursor) state.aiKeys.cursor = cursor;
+    const [provider, label] = String(record.AI_Provider || '').split('|');
+    if (provider) {
+      state.ai.provider = provider;
+      state.ai.label = label || state.ai.label || '';
+      if (record.AI_API_URL) state.ai.apiUrl = record.AI_API_URL;
+      if (record.AI_Model) state.ai.model = record.AI_Model;
+    }
+    refreshAiFromKeys();
+  }
+
+  function aiName() {
+    return state.ai.label || (state.aiProviders[state.ai.provider] || {}).label || 'the AI provider';
+  }
+
+  function zohoWriteResult(resp) {
+    const row = resp?.data?.[0];
+    if (!row) return { ok: false, message: 'Zoho CRM returned an empty response.' };
+    if (row.code === 'SUCCESS' || row.status === 'success') {
+      return { ok: true, id: row.details?.id || null, message: row.message || 'Saved' };
+    }
+    return { ok: false, code: row.code, message: row.message || row.code || 'CRM rejected the settings record.' };
+  }
+
+  function pickSettingsRecord(rows) {
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const named = rows.filter(r => r.Name === 'agent_config_v1');
+    const pool = named.length ? named : rows;
+    pool.sort((a, b) => new Date(b.Modified_Time || b.Created_Time || 0) - new Date(a.Modified_Time || a.Created_Time || 0));
+    return pool[0];
+  }
+
+  async function findExistingSettingsRecord() {
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.API) return null;
+    if (ZOHO.CRM.API.searchRecord) {
+      try {
+        const search = await ZOHO.CRM.API.searchRecord({
+          Entity: 'Living_Docs_Settings',
+          Type: 'criteria',
+          Query: '(Name:equals:agent_config_v1)'
+        });
+        const found = pickSettingsRecord(search?.data || []);
+        if (found) return found;
+      } catch (err) {
+        console.warn('[Settings search]', err);
+      }
+    }
+    if (ZOHO.CRM.API.getAllRecords) {
+      try {
+        const resp = await ZOHO.CRM.API.getAllRecords({
+          Entity: 'Living_Docs_Settings',
+          sort_order: 'desc',
+          per_page: 200
+        });
+        return pickSettingsRecord(resp?.data || []);
+      } catch (err) {
+        console.warn('[Settings list]', err);
+      }
+    }
+    return null;
+  }
+
+  function saveSettingsRecord() {
+    return upsertSettingsRecord({
+      docsAgentConnection: state.settings.docsAgentConnection,
+      workdriveConnection: state.settings.workdriveConnection,
+      workdriveFolder: state.settings.workdriveFolder,
+      scheduleFrequency: state.settings.scheduleFrequency
+    });
+  }
+
+  async function upsertSettingsRecord(fields) {
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.API) {
+      return { ok: false, action: 'unavailable', message: 'Open the widget inside Zoho CRM to save settings.' };
+    }
+
+    let existingId = state.settingsRecordId;
+    if (!existingId) {
+      const existing = await findExistingSettingsRecord();
+      existingId = existing?.id || null;
+    }
+
+    const APIData = {
+      Name: 'agent_config_v1',
+      Docs_Agent_Connection: fields.docsAgentConnection,
+      Workdrive_Connection: fields.workdriveConnection,
+      Workdrive_Folder_Id: fields.workdriveFolder,
+      AI_Provider: state.ai.provider ? `${state.ai.provider}|${state.ai.label || ''}` : '',
+      AI_Model: state.ai.model || '',
+      AI_API_URL: state.ai.apiUrl || '',
+      Claude_API_Key: state.aiKeys.anthropic || '',
+      Cursor_API_Key: state.aiKeys.cursor || ''
+    };
+    if (fields.scheduleFrequency) APIData.Schedule_Frequency = fields.scheduleFrequency;
+    if (state.audience) APIData.Audience = state.audience;
+
+    const write = async (data, isUpdate) => {
+      if (isUpdate) {
+        return ZOHO.CRM.API.updateRecord({
+          Entity: 'Living_Docs_Settings',
+          APIData: data
+        });
+      }
+      return ZOHO.CRM.API.insertRecord({
+        Entity: 'Living_Docs_Settings',
+        APIData: data
+      });
+    };
+
+    // A failed write usually means the module is missing a field (older install), so add the fields and retry once.
+    const attempt = async (data, isUpdate) => {
+      try {
+        let result = zohoWriteResult(await write(data, isUpdate));
+        if (!result.ok && !state.settingsFieldsEnsured) {
+          state.settingsFieldsEnsured = true;
+          const spec = LIVING_DOCS_MODULES.find(m => m.key === 'settings');
+          await ensureModuleFields(state.settings.docsAgentConnection || 'docsagent_connection', spec, (msg, type) => console.log('[Settings fields]', type, msg));
+          result = zohoWriteResult(await write(data, isUpdate));
+        }
+        return result;
+      } catch (err) {
+        return { ok: false, message: describeSdkError(err) };
+      }
+    };
+
+    if (existingId && ZOHO.CRM.API.updateRecord) {
+      const updateData = { ...APIData, id: existingId };
+      const updated = await attempt(updateData, true);
+      if (updated.ok) {
+        state.settingsRecordId = existingId;
+        return { ok: true, action: 'updated', id: existingId };
+      }
+      // Only create a new row when the saved one was really deleted; any other failure must not add a second settings record.
+      const stillThere = await findExistingSettingsRecord();
+      if (stillThere && stillThere.id !== existingId) {
+        const retried = await attempt({ ...APIData, id: stillThere.id }, true);
+        state.settingsRecordId = stillThere.id;
+        return retried.ok
+          ? { ok: true, action: 'updated', id: stillThere.id }
+          : { ok: false, action: 'update-failed', id: stillThere.id, message: retried.message };
+      }
+      if (stillThere) {
+        state.settingsRecordId = stillThere.id;
+        return { ok: false, action: 'update-failed', id: stillThere.id, message: updated.message };
+      }
+      state.settingsRecordId = null;
+    }
+
+    if (!ZOHO.CRM.API.insertRecord) {
+      return { ok: false, action: 'unavailable', message: 'Zoho CRM record API is not available in this widget.' };
+    }
+    const created = await attempt(APIData, false);
+    if (!created.ok) {
+      return { ok: false, action: 'create-failed', message: created.message };
+    }
+    state.settingsRecordId = created.id || state.settingsRecordId;
+    return { ok: true, action: 'created', id: state.settingsRecordId };
+  }
+
   // ==========================================
   // AUTO-PROVISION CUSTOM MODULES & FIELDS (Zoho API v8)
   // Complete implementation of https://www.zoho.com/crm/developer/docs/api/v8/create-custom-module-api.html
   // ==========================================
+  const LIVING_DOCS_MODULES = [
+    {
+      key: 'settings', apiName: 'Living_Docs_Settings', plural: 'Living Docs Settings', singular: 'Living Docs Setting',
+      fields: [
+        { label: 'Docs Agent Connection', type: 'text', length: 120 },
+        { label: 'Workdrive Connection', type: 'text', length: 120 },
+        { label: 'Workdrive Folder Id', type: 'text', length: 150 },
+        { label: 'Schedule Frequency', type: 'text', length: 40 },
+        { label: 'AI Provider', type: 'text', length: 100 },
+        { label: 'AI Model', type: 'text', length: 120 },
+        { label: 'AI API URL', type: 'text', length: 255 },
+        { label: 'Claude API Key', type: 'textarea', length: 2000, textarea: 'small' },
+        { label: 'Cursor API Key', type: 'textarea', length: 2000, textarea: 'small' },
+        { label: 'Audience', type: 'text', length: 40 }
+      ]
+    },
+    {
+      key: 'documents', apiName: 'Living_Docs_Documents', plural: 'Living Docs Documents', singular: 'Living Docs Document',
+      fields: [
+        { label: 'Item Type', type: 'text', length: 20 },
+        { label: 'CRM Module', type: 'text', length: 255 },
+        { label: 'Item Name', type: 'text', length: 255 },
+        { label: 'Item Id', type: 'text', length: 60 },
+        { label: 'Doc Version', type: 'integer', length: 9 },
+        { label: 'File Name', type: 'text', length: 255 },
+        { label: 'Generated By', type: 'text', length: 150 },
+        { label: 'Generated At', type: 'datetime' },
+        { label: 'Generated By User', type: 'text', length: 150 },
+        { label: 'Audience', type: 'text', length: 40 },
+        { label: 'Related Items', type: 'textarea', length: 2000, textarea: 'small' },
+        { label: 'Masked Values', type: 'integer', length: 9 },
+        { label: 'Source Hash', type: 'text', length: 64 },
+        { label: 'Source Snapshot', type: 'textarea', length: 32000, textarea: 'large' }
+      ]
+    }
+  ];
+  const ZOHO_FIELDS_PER_CALL = 5;
+  const moduleApiNames = {};
+
+  function logModuleApi(key) {
+    const spec = LIVING_DOCS_MODULES.find(m => m.key === key);
+    return moduleApiNames[key] || (spec && spec.apiName);
+  }
+
+  function resolveLivingDocsModules(modules) {
+    LIVING_DOCS_MODULES.forEach((spec) => {
+      const found = findCustomModule(modules, spec.apiName);
+      if (found && found.api_name) moduleApiNames[spec.key] = found.api_name;
+    });
+  }
+
+  function fieldApiName(label) {
+    return label.trim().replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  }
+
+  function zohoFieldPayload(f) {
+    const out = { field_label: f.label, data_type: f.type };
+    if (f.length) out.length = f.length;
+    if (f.type === 'textarea') out.textarea = { type: f.textarea || 'small' };
+    return out;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function ensureCustomModule(docsConn, existingMods, profileIds, spec, log) {
+    const found = findCustomModule(existingMods, spec.apiName);
+    if (found) {
+      moduleApiNames[spec.key] = found.api_name || spec.apiName;
+      log(`${spec.apiName} already exists.`, 'ok');
+      return true;
+    }
+    log(`Creating custom module ${spec.apiName}…`, 'info');
+    try {
+      const resp = await withHardTimeout(invokeZohoConnectionAPI(docsConn, {
+        endpoint: '/crm/v8/settings/modules',
+        method: 'POST',
+        payload: { modules: [{ plural_label: spec.plural, singular_label: spec.singular, profiles: profileIds.length ? profileIds : undefined }] }
+      }), 20000, `Create ${spec.apiName}`);
+      const row = resp?.modules?.[0] || resp?.data?.[0] || resp || {};
+      if (row.code === 'SUCCESS' || row.status === 'success' || row.code === 'DUPLICATE_DATA') {
+        existingMods.push({ api_name: spec.apiName, plural_label: spec.plural, module_name: spec.apiName });
+        moduleApiNames[spec.key] = spec.apiName;
+        log(`${spec.apiName} ${row.code === 'DUPLICATE_DATA' ? 'already exists' : 'created'}.`, 'ok');
+        return true;
+      }
+      log(`${spec.apiName} was not created: ${row.message || row.code || JSON.stringify(resp).slice(0, 200)}`, 'warn');
+    } catch (err) {
+      log(`${spec.apiName} was not created: ${err.message || err}`, 'warn');
+    }
+    return false;
+  }
+
+  async function ensureModuleFields(docsConn, spec, log) {
+    const moduleApi = logModuleApi(spec.key);
+    let existing = null;
+    for (let attempt = 0; attempt < 3 && !existing; attempt++) {
+      try {
+        const body = await crmGet(`/crm/v8/settings/fields?module=${encodeURIComponent(moduleApi)}`, { connName: docsConn, timeoutMs: 15000 });
+        existing = Array.isArray(body.fields) ? body.fields : [];
+      } catch (err) {
+        if (attempt === 2) {
+          log(`Fields of ${moduleApi} could not be read: ${err.message || err}`, 'warn');
+          return;
+        }
+        await sleep(2000);
+      }
+    }
+    const have = new Set(existing.flatMap(f => [String(f.api_name || '').toLowerCase(), String(f.field_label || f.display_label || '').toLowerCase()]));
+    const missing = spec.fields.filter(f => !have.has(fieldApiName(f.label).toLowerCase()) && !have.has(f.label.toLowerCase()));
+    if (!missing.length) {
+      log(`${moduleApi}: all ${spec.fields.length} fields are present.`, 'ok');
+      return;
+    }
+    let created = 0;
+    const failed = [];
+    for (let i = 0; i < missing.length; i += ZOHO_FIELDS_PER_CALL) {
+      const chunk = missing.slice(i, i + ZOHO_FIELDS_PER_CALL);
+      try {
+        const resp = await withHardTimeout(invokeZohoConnectionAPI(docsConn, {
+          endpoint: `/crm/v8/settings/fields?module=${encodeURIComponent(moduleApi)}`,
+          method: 'POST',
+          payload: { fields: chunk.map(zohoFieldPayload) }
+        }), 20000, `Create fields on ${moduleApi}`);
+        const rows = Array.isArray(resp?.fields) ? resp.fields : [];
+        chunk.forEach((f, k) => {
+          const row = rows[k] || {};
+          if (row.code === 'SUCCESS' || row.status === 'success' || row.code === 'DUPLICATE_DATA') created++;
+          else failed.push(`${f.label} (${row.message || row.code || 'no response'})`);
+        });
+      } catch (err) {
+        chunk.forEach(f => failed.push(`${f.label} (${err.message || err})`));
+      }
+    }
+    if (created) log(`${moduleApi}: added ${plural(created, 'field')}.`, 'ok');
+    if (failed.length) log(`${moduleApi}: ${plural(failed.length, 'field')} not added: ${failed.join('; ')}`, 'warn');
+  }
+
   async function autoProvisionCustomModules(showFeedback = false, statusCallback = null) {
     const log = (msg, type = 'info') => {
       console.log('[Living Docs Agent]', msg);
@@ -861,308 +692,385 @@
         log('Checking existing CRM modules...', 'info');
         let existingMods = [];
         try {
-          const modResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
-            endpoint: '/crm/v8/settings/modules',
-            method: 'GET'
-          }), 3500, null);
-          existingMods = modResp?.modules || modResp?.data || [];
+          existingMods = await fetchCrmModules(docsConn);
         } catch (e) {
           console.warn('[Module Check API]', e);
+          log(`❌ Could not list CRM modules: ${e.message}. Skipping custom module creation to avoid duplicates.`, 'warn');
+          return { ok: false, message: `Could not list CRM modules: ${e.message}` };
         }
 
-        if (existingMods.length === 0 && ZOHO.CRM.META && ZOHO.CRM.META.getModules) {
-          try {
-            const metaResp = await withTimeout(ZOHO.CRM.META.getModules(), 2500, null);
-            existingMods = metaResp?.modules || [];
-          } catch (_) {}
+        for (const spec of LIVING_DOCS_MODULES) {
+          await ensureCustomModule(docsConn, existingMods, profileIds, spec, log);
+          await ensureModuleFields(docsConn, spec, log);
         }
 
-        const isModulePresent = (targetKey) => {
-          const lowerKey = targetKey.toLowerCase().replace(/_/g, '');
-          return existingMods.some(m => {
-            const api = (m.api_name || '').toLowerCase().replace(/_/g, '');
-            const sing = (m.singular_label || '').toLowerCase().replace(/_/g, '');
-            const plur = (m.plural_label || '').toLowerCase().replace(/_/g, '');
-            const modName = (m.module_name || '').toLowerCase().replace(/_/g, '');
-            return api.includes(lowerKey) || sing.includes(lowerKey) || plur.includes(lowerKey) || modName.includes(lowerKey);
-          });
-        };
-
-        // 3. Provision Living_Docs_Settings Module
-        const hasSettingsMod = isModulePresent('Living_Docs_Settings');
-        if (!hasSettingsMod) {
-          log('Creating custom module "Living_Docs_Settings" in Zoho CRM...', 'info');
-          const modPayload = {
-            modules: [{
-              plural_label: 'Living Docs Settings',
-              singular_label: 'Living Docs Setting',
-              profiles: profileIds.length > 0 ? profileIds : undefined
-            }]
-          };
-
-          try {
-            const createResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
-              endpoint: '/crm/v8/settings/modules',
-              method: 'POST',
-              payload: modPayload
-            }), 6000, null);
-
-            const firstItem = createResp?.modules?.[0] || createResp?.data?.[0] || createResp;
-            const respStr = JSON.stringify(createResp || '');
-            if (firstItem?.code === 'SUCCESS' || firstItem?.status === 'success' || createResp?.code === 'SUCCESS') {
-              log('✅ Custom module "Living_Docs_Settings" created successfully.', 'ok');
-            } else if (firstItem?.code === 'DUPLICATE_DATA' || respStr.includes('DUPLICATE')) {
-              log('✅ Custom module "Living_Docs_Settings" already exists in CRM.', 'ok');
-            } else if (firstItem?.message) {
-              log(`ℹ️ Settings module status: ${firstItem.message}`, 'info');
-            } else {
-              log('✅ Module "Living_Docs_Settings" provisioning initiated.', 'ok');
-            }
-          } catch (createErr) {
-            log(`Module creation note: ${createErr.message}`, 'warn');
+        // Create the settings row once, then update that same row
+        if (showFeedback && ZOHO.CRM.API) {
+          log('Saving configuration on Living_Docs_Settings...', 'info');
+          const saved = await saveSettingsRecord();
+          if (saved.ok) {
+            log(`✅ ${saved.action === 'created' ? 'Created' : 'Updated'} settings record ${saved.id || ''}.`, 'ok');
+          } else {
+            log(`Settings were not saved: ${saved.message || 'Could not write the settings row.'}`, 'warn');
           }
-        } else {
-          log('✅ Custom module "Living_Docs_Settings" already exists in CRM.', 'ok');
-        }
-
-        // 4. Provision Custom Fields on Living_Docs_Settings
-        log('Verifying custom fields on Living_Docs_Settings...', 'info');
-        const settingsFields = [
-          { field_label: 'Docs Agent Connection', data_type: 'text', length: 120 },
-          { field_label: 'Workdrive Connection', data_type: 'text', length: 120 },
-          { field_label: 'Claude Model', data_type: 'text', length: 100 },
-          { field_label: 'Workdrive Folder Id', data_type: 'text', length: 150 }
-        ];
-
-        try {
-          await withTimeout(invokeZohoConnectionAPI(docsConn, {
-            endpoint: '/crm/v8/settings/fields?module=Living_Docs_Settings',
-            method: 'POST',
-            payload: { fields: settingsFields }
-          }), 5000, null);
-          log('✅ Fields configured for Living_Docs_Settings.', 'ok');
-        } catch (fErr) {
-          log(`Fields status for Living_Docs_Settings: ${fErr.message || 'Configured'}`, 'info');
-        }
-
-        // 5. Provision Living_Docs_Snapshots Module
-        const hasSnapshotsMod = isModulePresent('Living_Docs_Snapshots');
-        if (!hasSnapshotsMod) {
-          log('Creating custom module "Living_Docs_Snapshots" in Zoho CRM...', 'info');
-          const modPayload = {
-            modules: [{
-              plural_label: 'Living Docs Snapshots',
-              singular_label: 'Living Docs Snapshot',
-              profiles: profileIds.length > 0 ? profileIds : undefined
-            }]
-          };
-
-          try {
-            const createResp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
-              endpoint: '/crm/v8/settings/modules',
-              method: 'POST',
-              payload: modPayload
-            }), 6000, null);
-
-            const firstItem = createResp?.modules?.[0] || createResp?.data?.[0] || createResp;
-            const respStr = JSON.stringify(createResp || '');
-            if (firstItem?.code === 'SUCCESS' || firstItem?.status === 'success' || createResp?.code === 'SUCCESS') {
-              log('✅ Custom module "Living_Docs_Snapshots" created successfully.', 'ok');
-            } else if (firstItem?.code === 'DUPLICATE_DATA' || respStr.includes('DUPLICATE')) {
-              log('✅ Custom module "Living_Docs_Snapshots" already exists in CRM.', 'ok');
-            } else if (firstItem?.message) {
-              log(`ℹ️ Snapshots module status: ${firstItem.message}`, 'info');
-            } else {
-              log('✅ Module "Living_Docs_Snapshots" provisioning initiated.', 'ok');
-            }
-          } catch (createErr) {
-            log(`Snapshots module creation note: ${createErr.message}`, 'warn');
-          }
-        } else {
-          log('✅ Custom module "Living_Docs_Snapshots" already exists in CRM.', 'ok');
-        }
-
-        // 6. Provision Custom Fields on Living_Docs_Snapshots
-        log('Verifying custom fields on Living_Docs_Snapshots...', 'info');
-        const snapshotFields = [
-          { field_label: 'Status', data_type: 'text', length: 100 },
-          { field_label: 'Generated Markdown', data_type: 'textarea', length: 32000 }
-        ];
-
-        try {
-          await withTimeout(invokeZohoConnectionAPI(docsConn, {
-            endpoint: '/crm/v8/settings/fields?module=Living_Docs_Snapshots',
-            method: 'POST',
-            payload: { fields: snapshotFields }
-          }), 5000, null);
-          log('✅ Fields configured for Living_Docs_Snapshots.', 'ok');
-        } catch (fErr) {
-          log(`Fields status for Living_Docs_Snapshots: ${fErr.message || 'Configured'}`, 'info');
-        }
-
-        // 7. Insert / Upsert Configuration Record into Living_Docs_Settings
-        if (ZOHO.CRM.API && ZOHO.CRM.API.insertRecord) {
-          try {
-            log('Saving configuration record into Living_Docs_Settings...', 'info');
-            const insertResp = await withTimeout(ZOHO.CRM.API.insertRecord({
-              Entity: 'Living_Docs_Settings',
-              APIData: {
-                Name: 'agent_config_v1',
-                Docs_Agent_Connection: state.settings.docsAgentConnection,
-                Workdrive_Connection: state.settings.workdriveConnection,
-                Claude_Model: state.settings.claudeModel,
-                Workdrive_Folder_Id: state.settings.workdriveFolder
-              }
-            }), 4000, null);
-            log('✅ Configuration saved directly in Living_Docs_Settings record.', 'ok');
-          } catch (recErr) {
-            log(`Settings record save notice: ${recErr.message || 'Saved'}`, 'info');
-          }
+          renderSettingsRecordStatus();
+          state.modulesProvisioned = true;
+          return saved;
         }
 
         state.modulesProvisioned = true;
-        if (dom.headerOrgPill) {
-          dom.headerOrgPill.innerHTML = `<span class="status-dot"></span><span>⚡ Custom Modules Active</span>`;
-          dom.headerOrgPill.className = 'status-pill success';
-        }
-        return;
+        return { ok: true };
       } catch (sdkErr) {
-        log(`⚠️ SDK Provision Notice: ${sdkErr.message}. Calling server provisioner...`, 'warn');
+        log(`⚠️ Modules could not be verified: ${sdkErr.message || sdkErr}`, 'warn');
+        return { ok: false, message: sdkErr.message || String(sdkErr) };
       }
     }
-
-    // Server-side fallback (Local dev / Standalone)
-    try {
-      const resp = await apiCall('/zoho/provision-modules', {
-        docsAgentConnection: docsConn,
-        workdriveConnection: state.settings.workdriveConnection
-      });
-      state.modulesProvisioned = true;
-      log(`✅ Server: ${resp.detail || 'Custom modules verified.'}`, 'ok');
-    } catch (err) {
-      log(`ℹ️ Standalone notice: ${err.message}`);
-    }
+    log('Open the widget inside Zoho CRM to install the Living Docs modules.', 'warn');
+    return { ok: false, message: 'The Zoho CRM SDK is not available.' };
   }
 
-  // ==========================================
-  // 1. SCAN & METADATA INVENTORY
-  // ==========================================
-  async function runFullScan() {
-    dom.btnRunFullScan.disabled = true;
-    dom.btnRunFullScan.innerHTML = '<span>Scanning CRM Metadata...</span>';
+  function isScannableModule(mod) {
+    if (!mod || !mod.api_name) return false;
+    if (mod.api_supported === false) return false;
+    const generated = String(mod.generated_type || '').toLowerCase();
+    return generated !== 'subform' && generated !== 'linking' && generated !== 'web';
+  }
 
-    try {
-      // 100% Widget-orchestrated scanning
-      const resp = await apiCall('/scan', {});
-      const snapshot = resp.snapshot || resp;
-      state.activeSnapshot = snapshot;
-      if (!state.baselineSnapshot) {
-        state.baselineSnapshot = snapshot;
+  async function mapPool(items, limit, worker) {
+    const queue = items.slice();
+    const runners = Array.from({ length: Math.min(limit, Math.max(items.length, 1)) }, async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        await worker(item);
       }
-
-      // Update UI Metrics
-      dom.statModulesCount.textContent = snapshot.stats?.total_modules || snapshot.modules?.length || 0;
-      dom.statFieldsCount.textContent = snapshot.stats?.total_fields || 0;
-      dom.statWorkflowsCount.textContent = snapshot.stats?.total_workflows || 0;
-      dom.statBlueprintsCount.textContent = snapshot.stats?.total_blueprints || 0;
-      dom.statFunctionsCount.textContent = snapshot.stats?.total_functions || snapshot.functions?.length || 0;
-      dom.scanTimestampBadge.textContent = `Last Scanned: ${new Date(snapshot.timestamp || Date.now()).toLocaleTimeString()}`;
-
-      // Populate Inventory Table & Workflows Table (initial/simulated data)
-      renderInventoryTable(snapshot);
-      renderWorkflowsTable(snapshot);
-
-      // Then attempt to fetch REAL Zoho CRM Workflow Rules via Named Connection
-      await fetchAndMergeRealWorkflows(snapshot);
-    } catch (err) {
-      console.error('Scan failed:', err);
-    } finally {
-      dom.btnRunFullScan.disabled = false;
-      dom.btnRunFullScan.innerHTML = '<span>Run Full Scan</span>';
-    }
+    });
+    await Promise.all(runners);
   }
 
-  // ==========================================
-  // FETCH REAL ZOHO CRM WORKFLOWS (API v8)
-  // Endpoint: GET /crm/v8/settings/automation/workflow_rules
-  // Required Scope: ZohoCRM.settings.workflow_rules.READ (or ALL)
-  // Reference: https://www.zoho.com/crm/developer/docs/api/v8/get-all-workflows.html
-  // ==========================================
-  async function fetchAndMergeRealWorkflows(snapshot) {
-    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
-
-    if (dom.workflowTotalCountBadge) {
-      dom.workflowTotalCountBadge.textContent = '⏳ Fetching from Zoho CRM...';
+  async function fetchCrmModules(docsConn) {
+    const connectionName = docsConn || state.settings.docsAgentConnection || 'docsagent_connection';
+    let connErr = null;
+    try {
+      const resp = await crmGet('/crm/v8/settings/modules', { connName: connectionName });
+      if (Array.isArray(resp.modules)) return resp.modules;
+      connErr = new Error(`"${connectionName}" returned no "modules" array from GET /crm/v8/settings/modules. Keys: ${Object.keys(resp).join(', ') || '(empty body)'}`);
+    } catch (e) {
+      connErr = e;
     }
+    console.warn('[DocsAgent] Modules via connection failed, trying ZOHO.CRM.META.getModules():', connErr);
 
-    // Strategy 1: Zoho Named Connection (when running inside CRM Widget)
-    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.CONNECTION && ZOHO.CRM.CONNECTION.invoke) {
+    if (typeof ZOHO !== 'undefined' && ZOHO.CRM?.META?.getModules) {
       try {
-        console.log('[Workflows] Fetching via Named Connection:', docsConn, 'using Scope: ZohoCRM.settings.workflow_rules.READ');
-        let allRules = [];
-        let page = 1;
-        let hasMore = true;
-
-        // Fetch all pages (up to 5 pages / 1000 rules)
-        while (hasMore && page <= 5) {
-          const wfResp = await withTimeout(
-            invokeZohoConnectionAPI(docsConn, {
-              endpoint: '/crm/v8/settings/automation/workflow_rules',
-              method: 'GET',
-              queryParams: { page: page, per_page: 200 }
-            }),
-            8000,
-            null
-          );
-
-          const rules = (wfResp && (wfResp.workflow_rules || wfResp.data || wfResp.workflows)) || [];
-          if (Array.isArray(rules) && rules.length > 0) {
-            allRules = allRules.concat(rules);
-          }
-          hasMore = (wfResp?.info?.more_records === true && rules.length === 200);
-          page++;
+        const metaResp = await withHardTimeout(ZOHO.CRM.META.getModules(), 15000, 'ZOHO.CRM.META.getModules');
+        console.log('[DocsAgent] ZOHO.CRM.META.getModules() response', metaResp);
+        if (Array.isArray(metaResp?.modules) && metaResp.modules.length) {
+          showToast(`Modules loaded via SDK fallback. Connection error: ${connErr.message}`, 'warning');
+          return metaResp.modules;
         }
+      } catch (metaErr) {
+        console.error('[DocsAgent] ZOHO.CRM.META.getModules() failed', metaErr);
+      }
+    }
+    throw connErr;
+  }
 
-        if (allRules.length > 0) {
-          console.log('[Workflows] Got ' + allRules.length + ' real workflow rules from Zoho CRM API v8');
-          const normalized = normalizeZohoWorkflows(allRules);
-          injectWorkflowsIntoSnapshot(snapshot, normalized);
-          renderWorkflowsTable(snapshot);
-          updateWorkflowCountStats(snapshot);
-          showScopesInfoBadge('live');
+  async function fetchModuleFields(docsConn, moduleApiName) {
+    const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: `/crm/v8/settings/fields?module=${encodeURIComponent(moduleApiName)}`,
+      method: 'GET'
+    }), 15000, null);
+    return Array.isArray(resp?.fields) ? resp.fields : [];
+  }
+
+  async function fetchOrgLabel(docsConn) {
+    const resp = await withTimeout(invokeZohoConnectionAPI(docsConn, {
+      endpoint: '/crm/v8/org',
+      method: 'GET'
+    }), 8000, null);
+    const org = resp?.org?.[0];
+    return org?.company_name || null;
+  }
+
+  async function fetchAllWorkflowRulePages(docsConn) {
+    const allRules = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 50) {
+      const wfResp = await crmGet(`/crm/v8/settings/automation/workflow_rules?page=${page}&per_page=200`, { connName: docsConn });
+      const rules = Array.isArray(wfResp.workflow_rules) ? wfResp.workflow_rules : [];
+      console.log(`[DocsAgent] workflow_rules page ${page}: ${rules.length} rules`, wfResp.info || {});
+      if (rules.length === 0) break;
+      allRules.push(...rules);
+      hasMore = wfResp.info?.more_records === true;
+      page += 1;
+    }
+    return allRules;
+  }
+
+  function workflowModuleName(rule) {
+    if (!rule || !rule.module) return '';
+    return typeof rule.module === 'string' ? rule.module : (rule.module.api_name || '');
+  }
+
+  // include_inner_details requires the module param and the full key list, so it is fetched per module.
+  async function enrichWorkflowRules(docsConn, rules) {
+    const moduleNames = [...new Set(rules.map(workflowModuleName).filter(Boolean))];
+    const byId = new Map(rules.map(rule => [String(rule.id), rule]));
+    const include = 'conditions,conditions.instant_actions,conditions.criteria_details,conditions.scheduled_actions';
+    await mapPool(moduleNames, 3, async (moduleName) => {
+      let page = 1;
+      let hasMore = true;
+      while (hasMore && page <= 20) {
+        const endpoint = `/crm/v8/settings/automation/workflow_rules?module=${encodeURIComponent(moduleName)}&page=${page}&per_page=200&include_inner_details=${encodeURIComponent(include)}`;
+        let wfResp;
+        try {
+          wfResp = await crmGet(endpoint, { connName: docsConn });
+        } catch (e) {
+          console.warn(`[DocsAgent] Could not load inner details for ${moduleName}; keeping summary rows.`, e);
           return;
-        } else {
-          console.warn('[Workflows] Named Connection returned empty workflow list — check scopes');
-          showScopesInfoBadge('scope_error');
         }
-      } catch (connErr) {
-        console.warn('[Workflows] Named Connection fetch failed:', connErr.message);
-        showScopesInfoBadge('scope_error');
+        const detailed = Array.isArray(wfResp.workflow_rules) ? wfResp.workflow_rules : [];
+        if (detailed.length === 0) break;
+        detailed.forEach(rule => {
+          if (rule && rule.id) byId.set(String(rule.id), { ...(byId.get(String(rule.id)) || {}), ...rule });
+        });
+        hasMore = wfResp.info?.more_records === true;
+        page += 1;
       }
-    }
+    });
+    return Array.from(byId.values());
+  }
 
-    // Strategy 2: Server-side proxy (standalone / dev mode)
+  async function hydrateWorkflowRecord(workflow) {
+    if (!canUseZohoConnection() || !workflow?.id) return workflow;
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    let singleResp;
     try {
-      console.log('[Workflows] Fetching via server proxy /api/crm/workflows');
-      const wfData = await fetch('/api/crm/workflows').then(function(r) { return r.json(); });
-      const rules = wfData.workflow_rules || [];
-      if (rules.length > 0) {
-        console.log('[Workflows] Server proxy returned ' + rules.length + ' workflow rules');
-        const normalized = normalizeZohoWorkflows(rules);
-        injectWorkflowsIntoSnapshot(snapshot, normalized);
-        renderWorkflowsTable(snapshot);
-        updateWorkflowCountStats(snapshot);
-        showScopesInfoBadge('simulated');
-        return;
-      }
-    } catch (serverErr) {
-      console.warn('[Workflows] Server proxy failed:', serverErr.message);
+      singleResp = await crmGet(`/crm/v8/settings/automation/workflow_rules/${encodeURIComponent(workflow.id)}`, { connName: docsConn, timeoutMs: 15000 });
+    } catch (e) {
+      console.warn(`[DocsAgent] GET workflow_rules/${workflow.id} failed`, e);
+      return workflow;
     }
+    const raw = singleResp?.workflow_rules?.[0];
+    if (!raw) return workflow;
+    const normalized = normalizeZohoWorkflows([raw])[0];
+    return { ...workflow, ...normalized, module: normalized.module || workflow.module };
+  }
 
-    // Fallback: use simulated data already rendered from /api/scan
-    console.log('[Workflows] Using simulated data from scan snapshot');
-    updateWorkflowCountStats(snapshot);
-    showScopesInfoBadge('simulated');
+  function collectFunctionActions(workflow) {
+    const source = workflow?._raw || workflow || {};
+    const asList = (value) => Array.isArray(value) ? value : (value ? [value] : []);
+    const found = [];
+    const push = (action, timing) => {
+      if (!action || typeof action !== 'object') return;
+      const type = String(action.type || action.action_type || '');
+      if (!/function|deluge/i.test(type)) return;
+      const related = action.related_details || {};
+      found.push({
+        id: String(action.id || related.id || ''),
+        api_name: related.api_name || action.api_name || '',
+        name: action.name || action.action_name || related.name || '',
+        type,
+        timing
+      });
+    };
+    asList(source.conditions).forEach((condition) => {
+      asList(condition.instant_actions).forEach((group) => {
+        asList(group.actions).forEach((action) => push(action, 'instant'));
+      });
+      asList(condition.scheduled_actions).forEach((group) => {
+        asList(group.actions).forEach((action) => push(action, 'scheduled'));
+      });
+    });
+    asList(source.actions).forEach((action) => push(action, 'instant'));
+    if (!found.length) {
+      asList(workflow?.actions).forEach((action) => {
+        if (typeof action !== 'string') return;
+        const match = action.match(/^(?:\[Scheduled\]\s*)?(?:functions|function|deluge)\s*:\s*(.+)$/i);
+        if (match) {
+          found.push({
+            id: '',
+            api_name: '',
+            name: match[1].trim(),
+            type: 'functions',
+            timing: /scheduled/i.test(action) ? 'scheduled' : 'instant'
+          });
+        }
+      });
+    }
+    const seen = new Set();
+    return found.filter((item) => {
+      const key = `${item.id}|${item.api_name}|${item.name}|${item.timing}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  async function fetchFunctionCatalog(docsConn) {
+    const pages = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 20) {
+      const endpoint = page === 1
+        ? '/crm/v8/settings/functions?per_page=200'
+        : `/crm/v8/settings/functions?page=${page}&per_page=200`;
+      const resp = await crmGet(endpoint, { connName: docsConn, timeoutMs: 20000 });
+      const list = Array.isArray(resp?.functions) ? resp.functions : [];
+      if (!list.length) break;
+      pages.push(...list);
+      hasMore = resp.info?.more_records === true;
+      page += 1;
+    }
+    return pages;
+  }
+
+  // The .ds download is not JSON, so CONNECTION.invoke hands it back in several shapes
+  // (plain string, { raw_text }, or a JSON body from the legacy functions endpoint).
+  function textFromFunctionDownload(body) {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    if (typeof body !== 'object') return '';
+    const keys = ['raw_text', '_code', 'script', 'source', 'content', 'response', 'data'];
+    for (const key of keys) {
+      if (typeof body[key] === 'string' && body[key].trim()) return body[key];
+    }
+    if (typeof body.code === 'string' && /[\n;{}]/.test(body.code)) return body.code;
+    const first = Array.isArray(body.functions) ? body.functions[0] : null;
+    if (first) return textFromFunctionDownload(first);
+    if (body.details && typeof body.details === 'object') return textFromFunctionDownload(body.details);
+    return '';
+  }
+
+  async function downloadFunctionSource(docsConn, fn) {
+    const ids = [...new Set([fn.id, fn.api_name].map(v => String(v || '').trim()).filter(Boolean))];
+    const attempts = [];
+    const endpoints = [];
+    ids.forEach(idf => endpoints.push(`/crm/v8/settings/functions/${encodeURIComponent(idf)}/code`));
+    if (fn.id) {
+      endpoints.push(`/crm/v2/settings/functions/${encodeURIComponent(fn.id)}?source=crm&language=deluge`);
+    }
+    for (const endpoint of endpoints) {
+      try {
+        const body = await crmGet(endpoint, { connName: docsConn, timeoutMs: 20000 });
+        const source = textFromFunctionDownload(body);
+        if (source.startsWith('PK')) {
+          attempts.push({ endpoint, result: 'ZIP package (Java / Node.js / Python)' });
+          return {
+            source: '',
+            attempts,
+            note: 'Zoho returned a ZIP package. Java, Node.js, and Python functions download as ZIP; only Deluge downloads as text.'
+          };
+        }
+        if (source.trim()) {
+          attempts.push({ endpoint, result: `ok, ${source.length} characters` });
+          return { source, attempts, endpoint, note: '' };
+        }
+        const keys = body && typeof body === 'object' ? Object.keys(body).join(', ') : typeof body;
+        attempts.push({ endpoint, result: `no source in response (keys: ${keys || 'empty'})` });
+      } catch (err) {
+        attempts.push({ endpoint, result: err.message || String(err) });
+      }
+    }
+    return {
+      source: '',
+      attempts,
+      note: 'No endpoint returned function source. Check that the connection has ZohoCRM.settings.functions.READ and that the function is published.'
+    };
+  }
+
+  function matchCatalogFunction(catalog, ref) {
+    const id = String(ref.id || '');
+    const apiName = String(ref.api_name || '').toLowerCase();
+    const name = String(ref.name || '').trim().toLowerCase();
+    return catalog.find((fn) => id && String(fn.id) === id)
+      || catalog.find((fn) => apiName && String(fn.api_name || '').toLowerCase() === apiName)
+      || catalog.find((fn) => name && String(fn.api_name || '').toLowerCase() === name)
+      || catalog.find((fn) => name && String(fn.name || fn.display_name || '').trim().toLowerCase() === name)
+      || null;
+  }
+
+  const FUNCTION_SOURCE_MAX_CHARS = 60000;
+
+  async function attachFunctionCodeToWorkflows(workflows) {
+    if (!canUseZohoConnection() || !workflows?.length) return workflows || [];
+    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
+    let catalog = [];
+    state.functionCatalogError = '';
+    try {
+      catalog = (state.functionCatalog && state.functionCatalog.length) ? state.functionCatalog : await fetchFunctionCatalog(docsConn);
+    } catch (err) {
+      state.functionCatalogError = err.message || String(err);
+      console.warn('[DocsAgent] GET /crm/v8/settings/functions failed. Add ZohoCRM.settings.functions.READ to the connection.', err);
+    }
+    const cache = new Map();
+    const enriched = [];
+    for (const workflow of workflows) {
+      const refs = collectFunctionActions(workflow);
+      const functionCode = [];
+      for (const ref of refs) {
+        const match = matchCatalogFunction(catalog, ref);
+        const fnId = String((match && match.id) || ref.id || '');
+        const fnApiName = (match && match.api_name) || ref.api_name || '';
+        const cacheKey = String(fnId || fnApiName || ref.name || '');
+        if (!cache.has(cacheKey)) {
+          if (!fnId && !fnApiName) {
+            cache.set(cacheKey, {
+              name: ref.name,
+              source: '',
+              attempts: [],
+              error: 'This workflow action has a function name but no function id, and it was not found in GET /settings/functions.'
+            });
+          } else {
+            const downloaded = await downloadFunctionSource(docsConn, { id: fnId, api_name: fnApiName });
+            const source = downloaded.source || '';
+            cache.set(cacheKey, {
+              id: fnId,
+              api_name: fnApiName,
+              name: (match && (match.display_name || match.name)) || ref.name || fnApiName,
+              category: (match && match.category) || '',
+              language: (match && match.language) || '',
+              runtime: (match && match.runtime) || '',
+              description: (match && match.description) || '',
+              arguments: (match && match.arguments) || [],
+              modified_time: (match && (match.modified_time || match.modified_on || match.updated_time)) || '',
+              modified_by: (match && (match.modified_by?.name || match.modified_by?.full_name || (typeof match.modified_by === 'string' ? match.modified_by : ''))) || '',
+              source: source.slice(0, FUNCTION_SOURCE_MAX_CHARS),
+              source_truncated: source.length > FUNCTION_SOURCE_MAX_CHARS,
+              source_endpoint: downloaded.endpoint || '',
+              attempts: downloaded.attempts || [],
+              in_catalog: !!match,
+              note: downloaded.note || ''
+            });
+          }
+        }
+        functionCode.push({
+          timing: ref.timing,
+          action_type: ref.type,
+          ...cache.get(cacheKey)
+        });
+      }
+      const copy = { ...workflow, function_code: functionCode };
+      delete copy._raw;
+      enriched.push(copy);
+    }
+    return enriched;
+  }
+
+  function formatCriteria(criteria) {
+    if (criteria == null || criteria === '') return '';
+    if (typeof criteria === 'string') return criteria;
+    if (Array.isArray(criteria)) return criteria.map(formatCriteria).filter(Boolean).join(' AND ');
+    if (typeof criteria !== 'object') return String(criteria);
+    if (criteria.group_operator && Array.isArray(criteria.group)) {
+      return criteria.group.map(formatCriteria).filter(Boolean).join(` ${criteria.group_operator} `);
+    }
+    if (criteria.field || criteria.comparator || criteria.value != null) {
+      const field = (criteria.field && (criteria.field.api_name || criteria.field)) || 'Field';
+      const value = criteria.value == null ? '' : (typeof criteria.value === 'object' ? JSON.stringify(criteria.value) : criteria.value);
+      return `${field} ${criteria.comparator || ''} ${value}`.trim();
+    }
+    return '';
   }
 
   // Normalize Zoho CRM API v8 workflow_rules → internal format with conditions & actions
@@ -1172,23 +1080,32 @@
       let crit = (wf.execute_when && wf.execute_when.details && wf.execute_when.details.criteria) ||
                  (wf.condition && wf.condition.criteria) ||
                  wf.criteria || null;
-      if (!crit && wf.conditions && wf.conditions.length > 0) {
-        const c0 = wf.conditions[0];
-        if (c0.criteria_details?.criteria) {
-          const cObj = c0.criteria_details.criteria;
-          crit = `${cObj.field?.api_name || 'Field'} ${cObj.comparator || 'equals'} ${cObj.value || ''}`;
-        }
+      const conditionList = Array.isArray(wf.conditions) ? wf.conditions : [];
+      if (!crit && conditionList.length > 0) {
+        const parts = conditionList.map(c => {
+          const cd = c.criteria_details || {};
+          const main = cd.criteria ? formatCriteria(cd.criteria) : '';
+          const rel = cd.relational_criteria?.criteria
+            ? `[${cd.relational_criteria.module?.api_name || 'Related'}] ${formatCriteria(cd.relational_criteria.criteria)}`
+            : '';
+          return [main, rel].filter(Boolean).join(' AND ');
+        }).filter(Boolean);
+        if (parts.length === 1) crit = parts[0];
+        else if (parts.length > 1) crit = parts.map((p, i) => `Condition ${i + 1}: ${p}`).join(' | ');
       }
+      if (crit && typeof crit === 'object') crit = formatCriteria(crit);
 
-      // Extract actions from wf.actions OR wf.conditions
+      const asList = (v) => Array.isArray(v) ? v : (v ? [v] : []);
       let actionList = wf.actions || wf.workflow_actions || [];
-      if ((!actionList || actionList.length === 0) && wf.conditions && wf.conditions.length > 0) {
+      if ((!actionList || actionList.length === 0) && conditionList.length > 0) {
         const extracted = [];
-        wf.conditions.forEach(c => {
-          (c.instant_actions?.actions || []).forEach(a => {
-            extracted.push(a.name ? `${a.type || 'Action'}: ${a.name}` : a);
+        conditionList.forEach(c => {
+          asList(c.instant_actions).forEach(ia => {
+            (ia.actions || []).forEach(a => {
+              extracted.push(a.name ? `${a.type || 'Action'}: ${a.name}` : a);
+            });
           });
-          (c.scheduled_actions || []).forEach(sa => {
+          asList(c.scheduled_actions).forEach(sa => {
             (sa.actions || []).forEach(a => {
               extracted.push(a.name ? `[Scheduled] ${a.type || 'Action'}: ${a.name}` : a);
             });
@@ -1204,7 +1121,7 @@
         trigger_type: normalizeTriggerType((wf.execute_when && wf.execute_when.type) || wf.rule_trigger_category || wf.trigger || 'on_record_action'),
         criteria: crit,
         actions: extractActionLabels(actionList),
-        module: (wf.module && (wf.module.api_name || wf.module)) || wf.module || 'Unknown',
+        module: workflowModuleName(wf) || 'Unknown',
         module_id: (wf.module && wf.module.id) || null,
         created_time: wf.created_time || null,
         created_by: wf.created_by || null,
@@ -1244,972 +1161,3150 @@
     });
   }
 
-  // Inject normalized workflows back into the snapshot modules array by module name
-  function injectWorkflowsIntoSnapshot(snapshot, normalizedWorkflows) {
-    if (!snapshot.modules) snapshot.modules = [];
-
-    var byModule = {};
-    normalizedWorkflows.forEach(function(wf) {
-      var mod = wf.module || 'Unknown';
-      if (!byModule[mod]) byModule[mod] = [];
-      byModule[mod].push(wf);
-    });
-
-    Object.keys(byModule).forEach(function(modName) {
-      var wfs = byModule[modName];
-      var modEntry = snapshot.modules.find(function(m) { return m.module === modName; });
-      if (!modEntry) {
-        modEntry = { module: modName, component_id: 'mod_' + modName, fields: [], workflows: [], blueprints: [] };
-        snapshot.modules.push(modEntry);
-      }
-      modEntry.workflows = wfs;
-    });
-
-    state.allWorkflowsList = normalizedWorkflows;
+  function pdfBytesFromBase64(encoded) {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
   }
 
-  function updateWorkflowCountStats(snapshot) {
-    var total = 0;
-    var activeCount = 0;
-    var list = state.allWorkflowsList || [];
-
-    if (list.length > 0) {
-      total = list.length;
-      activeCount = list.filter(w => w.status === 'active' || (w.status && w.status.active === true) || w.status === true).length;
-    } else {
-      (snapshot.modules || []).forEach(function(m) {
-        (m.workflows || []).forEach(function(w) {
-          total++;
-          if (w.status === 'active' || (w.status && w.status.active === true) || w.status === true) {
-            activeCount++;
-          }
-        });
-      });
-    }
-
-    // Update KPI Card Total Workflows
-    if (dom.statWorkflowsCount) dom.statWorkflowsCount.textContent = total;
-    if (dom.statWorkflowsSub) {
-      dom.statWorkflowsSub.textContent = `${activeCount} active · Scope: v8 READ`;
-    }
-
-    // Update Explorer Badge
-    if (dom.workflowTotalCountBadge) dom.workflowTotalCountBadge.textContent = `${total} Workflows Loaded`;
-    if (snapshot.stats) snapshot.stats.total_workflows = total;
-
-    // Dynamically populate module dropdown filter
-    populateModuleFilterOptions();
-  }
-
-  function populateModuleFilterOptions() {
-    if (!dom.filterWorkflowModule) return;
-    const currentVal = dom.filterWorkflowModule.value || 'ALL';
-    const modulesSet = new Set();
-    state.allWorkflowsList.forEach(w => {
-      if (w.module) modulesSet.add(w.module);
-    });
-
-    let opts = '<option value="ALL">All Modules</option>';
-    modulesSet.forEach(mod => {
-      const isSel = (mod === currentVal) ? 'selected' : '';
-      opts += `<option value="${escapeHtml(mod)}" ${isSel}>${escapeHtml(mod)}</option>`;
-    });
-    dom.filterWorkflowModule.innerHTML = opts;
-  }
-
-  async function refreshWorkflowsOnly() {
-    if (dom.btnRefreshWorkflows) {
-      dom.btnRefreshWorkflows.disabled = true;
-      dom.btnRefreshWorkflows.innerHTML = '⏳ Refreshing...';
-    }
-
-    try {
-      const snap = state.activeSnapshot || { modules: [] };
-      await fetchAndMergeRealWorkflows(snap);
-    } catch (e) {
-      console.error('Refresh workflows error:', e);
-    } finally {
-      if (dom.btnRefreshWorkflows) {
-        dom.btnRefreshWorkflows.disabled = false;
-        dom.btnRefreshWorkflows.innerHTML = '🔄 Refresh';
-      }
-    }
-  }
-
-  // Show scope/source info badge in the workflow section header
-  function showScopesInfoBadge(mode) {
-    var scopeBadge = document.getElementById('wfScopeInfoBadge');
-    if (!scopeBadge) {
-      var headerArea = document.querySelector('.workflow-explorer-card .card-header-bar');
-      if (headerArea) {
-        scopeBadge = document.createElement('div');
-        scopeBadge.id = 'wfScopeInfoBadge';
-        scopeBadge.style.cssText = 'font-size:11.5px; margin-top:10px; padding:7px 12px; border-radius:8px; display:flex; align-items:center; gap:6px; width:100%; box-sizing:border-box;';
-        headerArea.appendChild(scopeBadge);
-      }
-    }
-    if (!scopeBadge) return;
-
-    var conn = escapeHtml(state.settings.docsAgentConnection || 'docsagent_connection');
-    if (mode === 'live') {
-      scopeBadge.style.background = '#d1fae5';
-      scopeBadge.style.color = '#065f46';
-      scopeBadge.style.border = '1px solid #6ee7b7';
-      scopeBadge.innerHTML = '✅ <strong>Live Zoho CRM Data</strong> — Fetched via <code>GET /crm/v8/settings/automation/workflow_rules</code> using Scope <code>ZohoCRM.settings.workflow_rules.READ</code> on Named Connection <code>' + conn + '</code>';
-    } else if (mode === 'simulated') {
-      scopeBadge.style.background = '#eff6ff';
-      scopeBadge.style.color = '#1e40af';
-      scopeBadge.style.border = '1px solid #bfdbfe';
-      scopeBadge.innerHTML = '⚡ <strong>Zoho CRM API v8 Workflows Active</strong> — Scope <code>ZohoCRM.settings.workflow_rules.READ</code> mapped to <code>' + conn + '</code>';
-    } else if (mode === 'scope_error') {
-      scopeBadge.style.background = '#fee2e2';
-      scopeBadge.style.color = '#991b1b';
-      scopeBadge.style.border = '1px solid #fca5a5';
-      scopeBadge.innerHTML = '❌ <strong>OAuth Scope Missing</strong> — Add <code>ZohoCRM.settings.workflow_rules.READ</code> (or <code>ZohoCRM.settings.workflow_rules.ALL</code>) to Connection <code>' + conn + '</code> in Zoho CRM Setup';
-    }
-  }
-
-  // ==========================================
-  // SINGLE WORKFLOW DETAIL MODAL (API v8)
-  // Endpoint: GET /settings/automation/workflow_rules/{id}
-  // Reference: https://www.zoho.com/crm/developer/docs/api/v8/get-a-workflow.html
-  // ==========================================
-  function switchModalTab(tabKey) {
-    document.querySelectorAll('.wf-modal-tab-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.getAttribute('data-modaltab') === tabKey);
-    });
-    const tabs = {
-      overview: document.getElementById('modalTabOverview'),
-      conditions: document.getElementById('modalTabConditions'),
-      json: document.getElementById('modalTabJson')
-    };
-    Object.keys(tabs).forEach(k => {
-      if (tabs[k]) {
-        tabs[k].style.display = (k === tabKey) ? 'block' : 'none';
-        tabs[k].classList.toggle('active', k === tabKey);
-      }
-    });
-  }
-
-  function closeWorkflowModal() {
-    if (dom.workflowDetailModal) {
-      dom.workflowDetailModal.style.display = 'none';
-    }
-    state.currentModalWorkflowId = null;
-  }
-
-  function copyModalJson() {
-    if (!dom.modalRawJson) return;
-    const text = dom.modalRawJson.textContent;
-    navigator.clipboard.writeText(text).then(() => {
-      if (dom.btnCopyModalJson) {
-        dom.btnCopyModalJson.textContent = '✓ Copied!';
-        setTimeout(() => { dom.btnCopyModalJson.textContent = '📋 Copy JSON'; }, 2000);
-      }
-    });
-  }
-
-  async function openWorkflowDetailModal(workflowId) {
-    state.currentModalWorkflowId = workflowId;
-    switchModalTab('overview');
-
-    let wf = state.allWorkflowsList.find(w => String(w.id) === String(workflowId));
-    let rawData = wf ? (wf._raw || wf) : null;
-
-    if (dom.workflowDetailModal) {
-      dom.workflowDetailModal.style.display = 'flex';
-    }
-
-    // Try fetching fresh specific workflow via API v8
-    const docsConn = state.settings.docsAgentConnection || 'docsagent_connection';
-    if (state.isZohoEmbedded && typeof ZOHO !== 'undefined' && ZOHO.CRM?.CONNECTION?.invoke) {
-      try {
-        const singleResp = await withTimeout(
-          invokeZohoConnectionAPI(docsConn, {
-            endpoint: `/crm/v8/settings/automation/workflow_rules/${workflowId}`,
-            method: 'GET'
-          }),
-          4000,
-          null
-        );
-        if (singleResp?.workflow_rules?.[0]) {
-          rawData = singleResp.workflow_rules[0];
-        }
-      } catch (err) {
-        console.log('[Workflow Single API notice]:', err.message);
-      }
-    } else {
-      // Standalone mode: fetch from local v8 endpoint
-      try {
-        const resp = await fetch(`/api/crm/workflows/${workflowId}`).then(r => r.json());
-        if (resp?.workflow_rules?.[0]) {
-          rawData = resp.workflow_rules[0];
-        }
-      } catch (_) {}
-    }
-
-    // Populate Overview
-    const wfName = rawData?.name || wf?.name || 'Workflow Rule';
-    const wfId = rawData?.id || workflowId;
-    const modName = (rawData?.module && (rawData.module.api_name || rawData.module)) || wf?.module || 'Unknown';
-    const isActive = (rawData?.status?.active === true || rawData?.active === true || wf?.status === 'active');
-    const trigger = rawData?.execute_when?.type || wf?.trigger_type || 'on_record_action';
-    const criteria = (rawData?.execute_when?.details?.criteria) || (rawData?.conditions?.[0]?.criteria_details?.criteria?.value) || wf?.criteria || 'Always Execute';
-    const desc = rawData?.description || wf?.description || 'No description provided';
-    const createdBy = rawData?.created_by?.name || 'Administrator';
-    const createdTime = rawData?.created_time ? new Date(rawData.created_time).toLocaleString() : 'N/A';
-    const modifiedBy = rawData?.modified_by?.name || 'Administrator';
-    const modifiedTime = rawData?.modified_time ? new Date(rawData.modified_time).toLocaleString() : 'N/A';
-    const source = rawData?.source || 'crm';
-
-    if (dom.modalWorkflowName) dom.modalWorkflowName.textContent = wfName;
-    if (dom.modalWorkflowId) dom.modalWorkflowId.textContent = `ID: ${wfId}`;
-    if (dom.modalWfModule) dom.modalWfModule.innerHTML = `<span class="badge badge-blue">${escapeHtml(modName)}</span>`;
-    if (dom.modalWfStatus) dom.modalWfStatus.innerHTML = `<span class="badge ${isActive ? 'badge-green' : 'badge-gray'}">${isActive ? '● Active' : '○ Inactive'}</span>`;
-    if (dom.modalWfTrigger) dom.modalWfTrigger.innerHTML = `<span class="badge badge-purple">${escapeHtml(formatTriggerType(trigger))}</span>`;
-    if (dom.modalWfSource) dom.modalWfSource.innerHTML = `<code>${escapeHtml(source)}</code>`;
-    if (dom.modalWfCreated) dom.modalWfCreated.textContent = `${createdTime} (${createdBy})`;
-    if (dom.modalWfModified) dom.modalWfModified.textContent = `${modifiedTime} (${modifiedBy})`;
-    if (dom.modalWfDesc) dom.modalWfDesc.textContent = desc;
-    if (dom.modalWfCriteria) dom.modalWfCriteria.textContent = typeof criteria === 'object' ? JSON.stringify(criteria, null, 2) : String(criteria);
-
-    // Populate Conditions & Actions
-    let condHtml = '';
-    const conditions = rawData?.conditions || [];
-    if (Array.isArray(conditions) && conditions.length > 0) {
-      conditions.forEach((c, cIdx) => {
-        const instantActs = c.instant_actions?.actions || [];
-        const schedActs = c.scheduled_actions || [];
-        const critObj = c.criteria_details?.criteria;
-        const critText = critObj ? `${critObj.field?.api_name || 'Field'} ${critObj.comparator || 'equals'} ${critObj.value || ''}` : 'No conditions specified';
-
-        condHtml += `
-          <div class="wizard-step-box" style="margin-bottom:12px;">
-            <div class="wizard-step-title">
-              <span class="wizard-step-badge">${c.sequence_number || cIdx + 1}</span>
-              Condition Rule #${c.sequence_number || cIdx + 1}
-            </div>
-            <div style="font-size:12px; margin-bottom:8px;">
-              <strong>Criteria:</strong> <code>${escapeHtml(critText)}</code>
-            </div>
-            <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">
-              Instant Actions (${instantActs.length}):
-            </div>
-            <div style="margin-bottom:10px;">
-              ${instantActs.map(a => formatActionTag(a.name ? `${a.type || 'Action'}: ${a.name}` : a)).join(' ') || '<em style="color:var(--text-light); font-size:11.5px;">None</em>'}
-            </div>
-            ${schedActs.length > 0 ? `
-              <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">
-                Scheduled Actions:
-              </div>
-              <div>${schedActs.map(sa => `<span class="badge badge-yellow">⏱️ Delay: ${sa.execute_after?.unit || 1} ${sa.execute_after?.period || 'days'}</span>`).join(' ')}</div>
-            ` : ''}
-          </div>
-        `;
-      });
-    } else {
-      const acts = wf?.actions || rawData?.actions || [];
-      condHtml = `
-        <div class="wizard-step-box">
-          <div class="wizard-step-title"><span class="wizard-step-badge">1</span> Default Execution Rule</div>
-          <div style="font-size:12px; margin-bottom:8px;"><strong>Trigger Criteria:</strong> <code>${escapeHtml(String(criteria))}</code></div>
-          <div style="font-size:12px; margin-bottom:4px; font-weight:600; color:var(--text-muted);">Configured Actions (${acts.length}):</div>
-          <div>${acts.map(act => formatActionTag(act)).join(' ') || '<em>None</em>'}</div>
-        </div>
-      `;
-    }
-    if (dom.modalConditionsContainer) dom.modalConditionsContainer.innerHTML = condHtml;
-
-    // Populate Raw JSON matching get-a-workflow.html
-    if (dom.modalRawJson) {
-      dom.modalRawJson.textContent = JSON.stringify({
-        workflow_rules: [rawData || wf]
-      }, null, 2);
-    }
-  }
-
-  function renderInventoryTable(snapshot) {
-    const modules = snapshot.modules || [];
-    let rows = '';
-
-    modules.forEach(m => {
-      const fieldsCount = (m.fields || []).length;
-      const wfCount = (m.workflows || []).length;
-      const bpCount = (m.blueprints || []).length;
-      const hash = m.hash || 'hash_mod_' + m.module.toLowerCase();
-
-      rows += `
-        <tr>
-          <td><strong>📦 ${escapeHtml(m.module)}</strong></td>
-          <td><code>${escapeHtml(m.component_id || 'mod_' + m.module)}</code></td>
-          <td><span class="badge badge-blue">${fieldsCount} fields</span></td>
-          <td><span class="badge badge-purple">${wfCount} workflows</span></td>
-          <td><span class="badge badge-yellow">${bpCount} blueprints</span></td>
-          <td><code>#${escapeHtml(hash.substring(0, 10))}</code></td>
-          <td><span class="badge badge-green">Documented</span></td>
-        </tr>
-      `;
-    });
-
-    // Add Functions row
-    const fns = snapshot.functions || [];
-    if (fns.length > 0) {
-      rows += `
-        <tr>
-          <td><strong>⚙️ Custom Deluge Functions</strong></td>
-          <td><code>component_functions</code></td>
-          <td><span class="badge badge-gray">-</span></td>
-          <td><span class="badge badge-gray">-</span></td>
-          <td><span class="badge badge-gray">-</span></td>
-          <td><code>#fn_hash_v1</code></td>
-          <td><span class="badge badge-green">${fns.length} Functions Active</span></td>
-        </tr>
-      `;
-    }
-
-    dom.inventoryTableBody.innerHTML = rows;
-  }
-
-  // ==========================================
-  // WORKFLOW EXPLORER & AI SELECTOR ENGINE
-  // ==========================================
-  function renderWorkflowsTable(snapshot) {
-    const modules = snapshot.modules || [];
-    const wfs = [];
-
-    modules.forEach(m => {
-      (m.workflows || []).forEach(w => {
-        wfs.push({
-          ...w,
-          module: m.module
-        });
-      });
-    });
-
-    state.allWorkflowsList = wfs;
-
-    if (dom.workflowTotalCountBadge) {
-      dom.workflowTotalCountBadge.textContent = `${wfs.length} Workflows Loaded`;
-    }
-    if (dom.statWorkflowsCount) {
-      dom.statWorkflowsCount.textContent = wfs.length;
-    }
-
-    filterAndRenderWorkflows();
-  }
-
-  function getVisibleWorkflows() {
-    const query = (dom.searchWorkflowInput?.value || '').toLowerCase().trim();
-    const modFilter = dom.filterWorkflowModule?.value || 'ALL';
-    const statusFilter = dom.filterWorkflowStatus?.value || 'ALL';
-
-    return state.allWorkflowsList.filter(w => {
-      const matchesMod = (modFilter === 'ALL' || w.module === modFilter);
-      const isActive = w.status === 'active' || (w.status && w.status.active === true) || w.status === true;
-      const matchesStatus = (statusFilter === 'ALL') ||
-        (statusFilter === 'active' && isActive) ||
-        (statusFilter === 'inactive' && !isActive);
-      const matchesSearch = !query ||
-        w.name.toLowerCase().includes(query) ||
-        (w.id && String(w.id).toLowerCase().includes(query)) ||
-        w.module.toLowerCase().includes(query) ||
-        (w.criteria && String(w.criteria).toLowerCase().includes(query)) ||
-        (w.actions && w.actions.some(a => String(a).toLowerCase().includes(query)));
-      return matchesMod && matchesStatus && matchesSearch;
-    });
-  }
-
-  function filterAndRenderWorkflows() {
-    if (!dom.workflowTableBody) return;
-    const visible = getVisibleWorkflows();
-
-    if (visible.length === 0) {
-      dom.workflowTableBody.innerHTML = `
-        <tr>
-          <td colspan="8" style="text-align:center; padding:24px; color:var(--text-muted);">
-            No workflow rules found matching the criteria.
-          </td>
-        </tr>
-      `;
-      updateWorkflowSelectionUI();
-      return;
-    }
-
-    let html = '';
-    visible.forEach(w => {
-      const isSelected = state.selectedWorkflowIds.has(w.id);
-      const triggerLabel = formatTriggerType(w.trigger_type || (w.execute_when && w.execute_when.type) || 'on_record_action');
-      const actionsHtml = (w.actions || []).map(act => formatActionTag(act)).join(' ') || '<span class="badge badge-gray">None</span>';
-      const isActive = w.status === 'active' || (w.status && w.status.active === true) || w.status === true;
-
-      html += `
-        <tr class="${isSelected ? 'wf-row-selected' : ''}" data-wfid="${escapeHtml(w.id)}">
-          <td style="text-align:center;">
-            <input type="checkbox" class="wf-checkbox wf-row-chk" data-wfid="${escapeHtml(w.id)}" ${isSelected ? 'checked' : ''} />
-          </td>
-          <td>
-            <strong>${escapeHtml(w.name)}</strong>
-            <div style="font-size:11px; color:var(--text-muted); font-family:monospace;">${escapeHtml(w.id)}</div>
-          </td>
-          <td><span class="badge badge-blue">${escapeHtml(w.module)}</span></td>
-          <td><span class="badge badge-purple">${escapeHtml(triggerLabel)}</span></td>
-          <td style="font-size:12px; max-width:200px; word-break:break-word;">
-            ${w.criteria ? escapeHtml(w.criteria) : '<em style="color:var(--text-light);">Always Execute</em>'}
-          </td>
-          <td style="max-width:240px;">${actionsHtml}</td>
-          <td>
-            <span class="badge ${isActive ? 'badge-green' : 'badge-gray'}">
-              ${isActive ? '● Active' : '○ Inactive'}
-            </span>
-          </td>
-          <td style="text-align:right; white-space:nowrap;">
-            <button class="btn-view-single-wf" data-wfid="${escapeHtml(w.id)}" title="Get workflow API v8 spec &amp; details">
-              👁️ Details
-            </button>
-            <button class="btn-doc-single-wf" data-wfid="${escapeHtml(w.id)}" title="Generate documentation specifically for this workflow">
-              ⚡ Document
-            </button>
-          </td>
-        </tr>
-      `;
-    });
-
-    dom.workflowTableBody.innerHTML = html;
-
-    // Bind row checkboxes
-    dom.workflowTableBody.querySelectorAll('.wf-row-chk').forEach(chk => {
-      chk.addEventListener('change', (e) => {
-        const id = chk.getAttribute('data-wfid');
-        if (e.target.checked) {
-          state.selectedWorkflowIds.add(id);
-        } else {
-          state.selectedWorkflowIds.delete(id);
-        }
-        updateWorkflowSelectionUI();
-      });
-    });
-
-    // Bind single view details button (Get a workflow API v8)
-    dom.workflowTableBody.querySelectorAll('.btn-view-single-wf').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id = btn.getAttribute('data-wfid');
-        openWorkflowDetailModal(id);
-      });
-    });
-
-    // Bind single document buttons
-    dom.workflowTableBody.querySelectorAll('.btn-doc-single-wf').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const id = btn.getAttribute('data-wfid');
-        state.selectedWorkflowIds.clear();
-        state.selectedWorkflowIds.add(id);
-        updateWorkflowSelectionUI();
-        documentSelectedWorkflows();
-      });
-    });
-
-    updateWorkflowSelectionUI();
-  }
-
-  function updateWorkflowSelectionUI() {
-    const count = state.selectedWorkflowIds.size;
-    if (dom.workflowSelectedCountBadge) {
-      dom.workflowSelectedCountBadge.textContent = `${count} Selected`;
-      dom.workflowSelectedCountBadge.className = count > 0 ? 'badge badge-green' : 'badge badge-blue';
-    }
-    if (dom.btnDocSelectedCount) {
-      dom.btnDocSelectedCount.textContent = count;
-    }
-    if (dom.btnDocSelectedWorkflows) {
-      dom.btnDocSelectedWorkflows.disabled = (count === 0);
-    }
-
-    if (dom.workflowTableBody) {
-      dom.workflowTableBody.querySelectorAll('tr[data-wfid]').forEach(tr => {
-        const id = tr.getAttribute('data-wfid');
-        const isSelected = state.selectedWorkflowIds.has(id);
-        tr.classList.toggle('wf-row-selected', isSelected);
-        const chk = tr.querySelector('.wf-row-chk');
-        if (chk) chk.checked = isSelected;
-      });
-    }
-
-    if (dom.chkWorkflowHeaderAll) {
-      const visible = getVisibleWorkflows();
-      if (visible.length === 0) {
-        dom.chkWorkflowHeaderAll.checked = false;
-        dom.chkWorkflowHeaderAll.indeterminate = false;
-      } else {
-        const selectedVisible = visible.filter(w => state.selectedWorkflowIds.has(w.id)).length;
-        dom.chkWorkflowHeaderAll.checked = (selectedVisible === visible.length);
-        dom.chkWorkflowHeaderAll.indeterminate = (selectedVisible > 0 && selectedVisible < visible.length);
-      }
-    }
-  }
-
-  function formatTriggerType(type) {
-    const map = {
-      'on_record_create': 'On Create',
-      'on_record_edit': 'On Edit',
-      'create_or_edit': 'Create / Edit',
-      'field_update': 'Field Update',
-      'incoming_call_createedit': 'Incoming Call',
-      'email_received': 'Email Received',
-      'overdue': 'Overdue Time',
-      'scheduled': 'Scheduled Cron'
-    };
-    return map[type] || type.replace(/_/g, ' ');
-  }
-
-  function formatActionTag(actionStr) {
-    let cls = 'field_update';
-    let icon = '⚡';
-    const lower = String(actionStr).toLowerCase();
-    if (lower.includes('webhook')) {
-      cls = 'webhook';
-      icon = '🔌';
-    } else if (lower.includes('function') || lower.includes('fn_') || lower.includes('deluge')) {
-      cls = 'function';
-      icon = '⚙️';
-    } else if (lower.includes('email') || lower.includes('alert')) {
-      cls = 'email';
-      icon = '✉️';
-    } else if (lower.includes('task') || lower.includes('assign')) {
-      cls = 'task';
-      icon = '📋';
-    }
-    return `<span class="action-pill-tag ${cls}">${icon} ${escapeHtml(actionStr)}</span>`;
-  }
-
-  async function documentSelectedWorkflows() {
-    const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
-    if (selectedWfs.length === 0) {
-      alert('Please select at least one workflow to document.');
-      return;
-    }
-
-    switchTab('tab-docs');
-    if (dom.selectDocType) {
-      dom.selectDocType.value = 'workflow_spec';
-    }
-
-    dom.btnGenerateDocs.disabled = true;
-    dom.btnGenerateDocs.innerHTML = `<span>Claude is documenting ${selectedWfs.length} Workflow(s)...</span>`;
-    dom.docRenderedOutput.innerHTML = `
-      <div style="text-align:center; padding:50px; color:var(--text-muted);">
-        <div class="status-dot" style="margin-bottom:8px;"></div>
-        <p>Generating targeted AI Workflow Automation Architecture &amp; Diagrams for <strong>${selectedWfs.length} selected rule(s)</strong>...</p>
-      </div>
-    `;
-
-    try {
-      const payload = {
-        doc_type: 'workflow_spec',
-        audience: dom.selectAudience?.value || 'admin',
-        snapshot: state.activeSnapshot,
-        selected_workflows: selectedWfs,
-        workflow_ids: selectedWfs.map(w => w.id)
-      };
-
-      const resp = await apiCall('/generate', payload);
-      state.generatedMarkdown = resp.markdown || '';
-      dom.docVersionBadge.textContent = `Workflows: ${selectedWfs.length} Rules Documented`;
-      dom.docModelBadge.textContent = `Model: ${resp.model || 'Claude 3.5 Sonnet'}`;
-
-      renderMarkdownOutput(state.generatedMarkdown);
-    } catch (err) {
-      console.error('Workflow doc generation failed:', err);
-      dom.docRenderedOutput.innerHTML = `<p style="color:var(--danger);">Error generating workflow documentation: ${escapeHtml(err.message)}</p>`;
-    } finally {
-      dom.btnGenerateDocs.disabled = false;
-      dom.btnGenerateDocs.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Generate with Claude';
-    }
-  }
-
-  // ==========================================
-  // 2. LIVING DOCS STUDIO
-  // ==========================================
-  async function generateDocs() {
-    dom.btnGenerateDocs.disabled = true;
-    dom.btnGenerateDocs.innerHTML = '<span>Claude is analyzing CRM config...</span>';
-    dom.docRenderedOutput.innerHTML = '<div style="text-align:center; padding:50px; color:var(--text-muted);"><div class="status-dot" style="margin-bottom:8px;"></div><p>Generating living documentation with Claude &amp; mapping components...</p></div>';
-
-    try {
-      const isWorkflowDoc = (dom.selectDocType.value === 'workflow_spec');
-      const selectedWfs = state.allWorkflowsList.filter(w => state.selectedWorkflowIds.has(w.id));
-      const targetWorkflows = (selectedWfs.length > 0) ? selectedWfs : state.allWorkflowsList;
-
-      const payload = {
-        doc_type: dom.selectDocType.value,
-        audience: dom.selectAudience.value,
-        snapshot: state.activeSnapshot,
-        selected_workflows: isWorkflowDoc ? targetWorkflows : (selectedWfs.length > 0 ? selectedWfs : undefined),
-        workflow_ids: isWorkflowDoc ? targetWorkflows.map(w => w.id) : (selectedWfs.length > 0 ? selectedWfs.map(w => w.id) : undefined)
-      };
-
-      const resp = await apiCall('/generate', payload);
-      state.generatedMarkdown = resp.markdown || '';
-      dom.docVersionBadge.textContent = isWorkflowDoc ? `Workflows: ${targetWorkflows.length} Rules Documented` : `Baseline: ${resp.snapshot_id || 'snap_v2.0'}`;
-      dom.docModelBadge.textContent = `Model: ${resp.model || 'Claude 3.5 Sonnet'}`;
-
-      // Render Markdown & Mermaid Flowcharts
-      renderMarkdownOutput(state.generatedMarkdown);
-
-      // Save to Living_Docs_Snapshots if running inside CRM SDK
-      if (typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.API && ZOHO.CRM.API.insertRecord) {
-        try {
-          await ZOHO.CRM.API.insertRecord({
-            Entity: 'Living_Docs_Snapshots',
-            APIData: {
-              Name: `Snapshot_${Date.now()}`,
-              Status: 'Active Baseline',
-              Generated_Markdown: state.generatedMarkdown.substring(0, 32000)
-            }
-          });
-        } catch (saveErr) {
-          console.log('[Snapshot record save notice]:', saveErr);
-        }
-      }
-    } catch (err) {
-      console.error('Doc generation failed:', err);
-      dom.docRenderedOutput.innerHTML = `<p style="color:var(--danger);">Error generating documentation: ${escapeHtml(err.message)}</p>`;
-    } finally {
-      dom.btnGenerateDocs.disabled = false;
-      dom.btnGenerateDocs.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Generate with Claude';
-    }
-  }
-
-  function renderMarkdownOutput(markdown) {
-    if (typeof marked !== 'undefined') {
-      dom.docRenderedOutput.innerHTML = marked.parse(markdown);
-      // Initialize Mermaid charts
-      if (typeof mermaid !== 'undefined') {
-        const mermaidBlocks = dom.docRenderedOutput.querySelectorAll('pre code.language-mermaid, pre code.language-graph');
-        mermaidBlocks.forEach((block) => {
-          const pre = block.parentElement;
-          const graphCode = block.textContent;
-          const graphDiv = document.createElement('div');
-          graphDiv.className = 'mermaid';
-          graphDiv.textContent = graphCode;
-          pre.replaceWith(graphDiv);
-        });
-        try {
-          mermaid.run();
-        } catch (e) {
-          console.warn('Mermaid rendering notice:', e);
-        }
-      }
-    } else {
-      dom.docRenderedOutput.innerHTML = `<pre>${escapeHtml(markdown)}</pre>`;
-    }
-  }
-
-  function copyMarkdownToClipboard() {
-    if (!state.generatedMarkdown) return;
-    navigator.clipboard.writeText(state.generatedMarkdown).then(() => {
-      dom.btnCopyMarkdown.textContent = '✓ Copied!';
-      setTimeout(() => { dom.btnCopyMarkdown.textContent = '📋 Copy Markdown'; }, 2000);
-    });
-  }
-
-  function downloadMarkdownFile() {
-    if (!state.generatedMarkdown) return;
-    const blob = new Blob([state.generatedMarkdown], { type: 'text/markdown;charset=utf-8;' });
+  function downloadPdfBytes(bytes, fileName) {
+    const blob = new Blob([bytes], { type: 'application/pdf' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `Zoho_CRM_Living_Docs_${new Date().toISOString().slice(0, 10)}.md`;
+    link.download = fileName;
+    document.body.appendChild(link);
     link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1500);
   }
 
-  async function exportToWorkDrive() {
-    if (!state.generatedMarkdown) {
-      alert('Please generate the documentation first.');
+  function documentTitle() {
+    const rules = state.reviewWorkflows;
+    return rules.length === 1 ? rules[0].name : `${rules.length} workflow rules`;
+  }
+
+  function pdfDocumentHtml() {
+    const g = state.generated;
+    const rules = state.reviewWorkflows;
+    const modules = [...new Set(rules.map(wf => moduleLabel(wf.module)).filter(Boolean))].join(', ');
+    return `
+      <header class="pdf-cover">
+        <div class="pdf-brand">Living Docs · Zoho CRM workflow documentation</div>
+        <h1 class="pdf-title">${escapeHtml(documentTitle())}</h1>
+        <div class="pdf-meta">
+          <span><b>Module</b> ${escapeHtml(modules || 'CRM')}</span>
+          <span><b>Date</b> ${escapeHtml(formatDate(g.at))}</span>
+          <span><b>Written by</b> ${escapeHtml(g.generatedBy || aiName())}</span>
+        </div>
+      </header>
+      <article class="doc-view pdf-body">${renderMarkdown(g.markdown)}</article>`;
+  }
+
+  async function renderPdfBytes() {
+    if (typeof window.html2pdf !== 'function') throw new Error('The PDF renderer did not load. Reload the widget and try again.');
+    const sheet = document.createElement('div');
+    sheet.className = 'pdf-sheet';
+    sheet.innerHTML = pdfDocumentHtml();
+    const title = documentTitle();
+    const pdf = await window.html2pdf().set({
+      margin: [12, 12, 16, 12],
+      filename: state.generated.fileName,
+      image: { type: 'jpeg', quality: 0.95 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover'] }
+    }).from(sheet).toPdf().get('pdf');
+    const total = pdf.internal.getNumberOfPages();
+    const width = pdf.internal.pageSize.getWidth();
+    const height = pdf.internal.pageSize.getHeight();
+    for (let page = 1; page <= total; page += 1) {
+      pdf.setPage(page);
+      pdf.setFontSize(8);
+      pdf.setTextColor(140, 146, 158);
+      pdf.text(`${title}  ·  Page ${page} of ${total}`, width / 2, height - 7, { align: 'center' });
+    }
+    return new Uint8Array(pdf.output('arraybuffer'));
+  }
+
+  // ==========================================
+  // SHARED UI HELPERS
+  // ==========================================
+  const $ = (id) => document.getElementById(id);
+
+  const ICON = {
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="12" y1="6" x2="12" y2="13"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>',
+    cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    up: '<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5 1l4 7H1z"/></svg>',
+    down: '<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5 9L1 2h8z"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>'
+  };
+
+  function conn() {
+    return state.settings.docsAgentConnection || 'docsagent_connection';
+  }
+
+  function canUseZohoConnection() {
+    return state.isZohoEmbedded && typeof ZOHO !== 'undefined' && !!(ZOHO.CRM && ZOHO.CRM.CONNECTION && ZOHO.CRM.CONNECTION.invoke);
+  }
+
+  function showToast(message, type = 'success') {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    $('toastHost').appendChild(toast);
+    setTimeout(() => {
+      toast.classList.add('toast-out');
+      setTimeout(() => toast.remove(), 250);
+    }, 4200);
+  }
+
+  function setBusy(btn, busy) {
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.classList.toggle('is-busy', busy);
+  }
+
+  function loadingBlock(text) {
+    return `<div class="loading-block"><div class="spinner"></div><p>${escapeHtml(text)}</p></div>`;
+  }
+
+  function copyText(text, btn, label) {
+    const done = () => {
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = label; }, 1800);
+    };
+    const fallback = () => {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand('copy'); done(); } catch (_) { showToast('Copy failed. Select the text manually.', 'warning'); }
+      area.remove();
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  }
+
+  function setOrg(label, status) {
+    dom.orgChipLabel.textContent = label;
+    dom.orgChip.className = `org-chip ${status || ''}`;
+  }
+
+  function showScreen(name) {
+    if (dom.screenBoot) dom.screenBoot.classList.toggle('active', name === 'boot');
+    dom.screenSetup.classList.toggle('active', name === 'setup');
+    dom.screenFlow.classList.toggle('active', name === 'flow');
+    dom.btnRescan.hidden = name !== 'flow';
+  }
+
+  const COMPARATOR_LABELS = {
+    not_equal: '≠', equal: '=', greater_equal: '≥', less_equal: '≤',
+    greater_than: '>', less_than: '<', not_contains: 'does not contain',
+    starts_with: 'starts with', ends_with: 'ends with', not_between: 'not between', not_in: 'not in'
+  };
+
+  function readableCriteria(text) {
+    return String(text || '').replace(/\b(not_equal|greater_equal|less_equal|greater_than|less_than|not_contains|starts_with|ends_with|not_between|not_in|equal)\b/g, m => COMPARATOR_LABELS[m]);
+  }
+
+  function shortCriteria(text) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    return clean.length > 48 ? `${clean.slice(0, 46)}…` : clean;
+  }
+
+  function displayCriteria(text) {
+    const value = String(text || '').trim();
+    return value.startsWith('(') && value.endsWith(')') ? value.slice(1, -1).trim() : value;
+  }
+
+  function formatDate(value) {
+    if (!value) return '';
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function triggerLabel(type) {
+    const map = {
+      on_record_create: 'On create', create: 'On create',
+      on_record_edit: 'On edit', edit: 'On edit',
+      create_or_edit: 'Create or edit', on_record_action: 'Record action',
+      field_update: 'Field update', delete: 'On delete', on_record_delete: 'On delete',
+      date_or_date_time: 'Date based', overdue: 'Overdue', scheduled: 'Scheduled',
+      email_received: 'Email received', incoming_call_createedit: 'Incoming call', score_update: 'Score update'
+    };
+    const key = String(type || '').toLowerCase();
+    return map[key] || key.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()) || 'Not set';
+  }
+
+  function actionTypeLabel(type) {
+    const map = {
+      field_updates: 'Field update', email_notifications: 'Email', tasks: 'Task', webhooks: 'Webhook',
+      functions: 'Function', assign_owner: 'Assign owner', add_tags: 'Add tags', remove_tags: 'Remove tags',
+      create_record: 'Create record', add_meeting: 'Meeting', schedule_call: 'Call', convert: 'Convert', circuits: 'Circuit'
+    };
+    return map[type] || String(type || 'Action').replace(/_/g, ' ');
+  }
+
+  function stripEmoji(text) {
+    return String(text || '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{2139}]/gu, '').trim();
+  }
+
+  // ==========================================
+  // ELEMENTS & EVENTS
+  // ==========================================
+  function initElements() {
+    [
+      'orgChip', 'orgChipLabel', 'btnRescan', 'btnOpenSettings',
+      'screenBoot', 'screenSetup', 'screenFlow', 'setupTitle', 'setupSubtitle', 'setupChecklist', 'setupForm',
+      'setupDocsConn', 'setupWdConn', 'setupWdFolder', 'setupLogWrap', 'setupLog',
+      'setupTabs', 'setupAiSummary', 'setupAiProvider', 'setupAiFields', 'setupAiLabel', 'setupAiUrl', 'setupAiUrlField', 'setupAiUrlHint',
+      'setupAiModel', 'setupAiModelList', 'setupAiClaudeKey', 'setupAiCursorKey', 'setupAiClaudeHint', 'setupAiCursorHint',
+      'btnSetupTestAi', 'setupAiTestResult',
+      'btnSetupRetry', 'btnSetupBack', 'btnSetupNext', 'btnSetupInstall', 'btnSetupContinue',
+      'stepper', 'scanStatus', 'moduleTableBody', 'btnToSelect',
+      'selectedCountPill', 'wfSearch', 'wfModuleFilter', 'wfStatusFilter', 'wfFunctionsOnly',
+      'btnClearSelection', 'wfCheckAll', 'wfTableBody', 'btnToReview',
+      'reviewStatus', 'reviewTabs', 'reviewBody', 'btnReviewDetails', 'promptCard', 'promptStats', 'promptSystem', 'promptUser',
+      'btnRebuildPrompt', 'btnCopyPrompt', 'btnGenerate',
+      'docStatus', 'btnViewDetails', 'btnViewDocument', 'btnCopyMd', 'btnDownloadMd', 'btnDownloadPdf', 'docNotice', 'docView', 'btnToSave',
+      'saveCard', 'btnStartOver',
+      'drawerBackdrop', 'settingsDrawer', 'btnCloseSettings', 'settingsDocsConn', 'settingsWdConn',
+      'settingsWorkDriveFolder', 'settingsAudience',
+      'settingsAiProvider', 'settingsAiFields', 'settingsAiLabel', 'settingsAiUrl', 'settingsAiUrlHint', 'settingsAiModel',
+      'settingsAiModelList', 'settingsAiKey', 'settingsAiKeyHint', 'btnTestAi', 'btnClearAiKey', 'settingsAiTestResult',
+      'settingsRecordNote', 'btnSettingsRecheck', 'btnSaveSettings',
+      'modalBackdrop', 'modalTitle', 'modalBody', 'modalCancel', 'modalConfirm', 'issueTip', 'maskSelBtn',
+      'ruleDocBackdrop', 'ruleDocTitle', 'ruleDocBody', 'btnCloseRuleDoc'
+    ].forEach((id) => { dom[id] = $(id); });
+  }
+
+  function bindEvents() {
+    dom.btnRescan.addEventListener('click', () => scanCrm(true));
+    dom.btnOpenSettings.addEventListener('click', openSettings);
+    dom.btnCloseSettings.addEventListener('click', closeSettings);
+    dom.drawerBackdrop.addEventListener('click', closeSettings);
+    dom.btnSaveSettings.addEventListener('click', saveSettings);
+    dom.settingsAiProvider.addEventListener('change', () => renderAiFields(true));
+    dom.btnTestAi.addEventListener('click', () => testAiConnection());
+    dom.settingsAiKey.addEventListener('change', () => loadAiModels(aiFormValues(), dom.settingsAiModelList));
+    dom.btnClearAiKey.addEventListener('click', () => {
+      state.clearAiKey = true;
+      renderAiFields(false);
+      showToast('The saved key is removed when you save.', 'warning');
+    });
+    dom.btnSettingsRecheck.addEventListener('click', () => { closeSettings(); runSetupCheck(true); });
+    $('btnShowUpdateHelper').addEventListener('click', () => { closeSettings(); showUpdateHelperDialog(); });
+
+    dom.btnSetupRetry.addEventListener('click', () => runSetupCheck(true));
+    dom.screenSetup.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-copy]');
+      if (!btn) return;
+      copyText(btn.dataset.copy, btn, btn.dataset.copyLabel || 'Copy');
+    });
+    dom.btnSetupInstall.addEventListener('click', installAndVerify);
+    dom.btnSetupContinue.addEventListener('click', enterFlow);
+    dom.btnSetupNext.addEventListener('click', () => showSetupTab(2));
+    dom.btnSetupBack.addEventListener('click', () => showSetupTab(1));
+    dom.setupTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest('[data-setup-tab]');
+      if (tab) showSetupTab(Number(tab.dataset.setupTab));
+    });
+    dom.setupAiProvider.addEventListener('change', () => renderSetupAiFields(true));
+    dom.btnSetupTestAi.addEventListener('click', () => testAiConnection(setupAiValues(), dom.setupAiTestResult, dom.btnSetupTestAi, dom.setupAiModelList));
+    dom.setupAiClaudeKey.addEventListener('change', () => {
+      if (dom.setupAiProvider.value === 'cursor') return;
+      loadAiModels(setupAiValues(), dom.setupAiModelList);
+    });
+    dom.setupAiCursorKey.addEventListener('change', () => {
+      if (dom.setupAiProvider.value !== 'cursor') return;
+      loadAiModels(setupAiValues(), dom.setupAiModelList);
+    });
+
+    dom.stepper.addEventListener('click', (e) => {
+      const item = e.target.closest('li[data-step]');
+      if (item && item.classList.contains('reachable')) goToStep(Number(item.dataset.step));
+    });
+    document.querySelectorAll('[data-goto]').forEach((btn) => {
+      btn.addEventListener('click', () => goToStep(Number(btn.dataset.goto)));
+    });
+
+    dom.btnToSelect.addEventListener('click', () => goToStep(2));
+    dom.moduleTableBody.addEventListener('click', (e) => {
+      const row = e.target.closest('tr[data-module]');
+      if (!row) return;
+      dom.wfModuleFilter.value = row.dataset.module;
+      renderWorkflowTable();
+      goToStep(2);
+    });
+
+    dom.wfSearch.addEventListener('input', renderWorkflowTable);
+    [dom.wfModuleFilter, dom.wfStatusFilter, dom.wfFunctionsOnly].forEach(el => el.addEventListener('change', renderWorkflowTable));
+    dom.wfCheckAll.addEventListener('change', () => {
+      visibleWorkflows().forEach((wf) => {
+        if (dom.wfCheckAll.checked) state.selectedWorkflowIds.add(wf.id);
+        else state.selectedWorkflowIds.delete(wf.id);
+      });
+      selectionChanged();
+    });
+    dom.wfTableBody.addEventListener('click', (e) => {
+      const show = e.target.closest('[data-show-rule]');
+      if (show) {
+        e.preventDefault();
+        showWorkflowRule(show.dataset.showRule);
+        return;
+      }
+      const row = e.target.closest('tr[data-id]');
+      if (!row) return;
+      const id = row.dataset.id;
+      if (state.selectedWorkflowIds.has(id)) state.selectedWorkflowIds.delete(id);
+      else state.selectedWorkflowIds.add(id);
+      selectionChanged();
+    });
+    dom.btnClearSelection.addEventListener('click', () => {
+      state.selectedWorkflowIds.clear();
+      selectionChanged();
+    });
+    dom.btnToReview.addEventListener('click', startReview);
+
+    dom.reviewTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest('[data-review-id]');
+      if (!tab) return;
+      state.activeReviewId = tab.dataset.reviewId;
+      renderReview();
+    });
+    bindFunctionReviewEvents();
+    dom.btnRebuildPrompt.addEventListener('click', buildPrompt);
+    dom.btnCopyPrompt.addEventListener('click', () => copyText(promptAsText(), dom.btnCopyPrompt, 'Copy prompt'));
+    [dom.promptSystem, dom.promptUser].forEach(el => el.addEventListener('input', updatePromptStats));
+    dom.btnGenerate.addEventListener('click', generateDocument);
+    dom.btnReviewDetails.addEventListener('click', () => openRuleView('details'));
+    dom.btnViewDetails.addEventListener('click', () => openRuleView('details'));
+    dom.btnViewDocument.addEventListener('click', () => openRuleView('document'));
+    dom.btnCloseRuleDoc.addEventListener('click', closeRuleDoc);
+    dom.ruleDocBackdrop.addEventListener('click', (e) => { if (e.target === dom.ruleDocBackdrop) closeRuleDoc(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && dom.ruleDocBackdrop && !dom.ruleDocBackdrop.hidden) closeRuleDoc();
+    });
+
+    dom.btnCopyMd.addEventListener('click', () => copyText(state.generated?.markdown || '', dom.btnCopyMd, 'Copy text'));
+    dom.btnDownloadMd.addEventListener('click', downloadMarkdown);
+    dom.btnDownloadPdf.addEventListener('click', downloadPdf);
+    dom.btnToSave.addEventListener('click', onSaveButton);
+    dom.btnStartOver.addEventListener('click', startOver);
+  }
+
+  function initApp() {
+    let started = false;
+    const start = (embedded) => {
+      if (started) return;
+      started = true;
+      state.isZohoEmbedded = embedded || hostedOnZohoStatic();
+      runSetupCheck();
+    };
+    const sdkReady = typeof ZOHO !== 'undefined' && ZOHO.embeddedApp;
+    if (!sdkReady) {
+      start(false);
+      return;
+    }
+    if (!hostedOnZohoStatic()) {
+      let framed = true;
+      try { framed = window.top !== window.self; } catch (_) { framed = true; }
+      if (!framed) {
+        start(false);
+        return;
+      }
+    }
+    ZOHO.embeddedApp.on('PageLoad', () => start(true));
+    ZOHO.embeddedApp.init().catch(() => start(hostedOnZohoStatic()));
+  }
+
+  // ==========================================
+  // SETUP CHECK (runs on every launch)
+  // ==========================================
+  const CHECKS = [
+    { key: 'crm', title: 'Zoho CRM connection' },
+    { key: 'settings', title: 'Saved settings' },
+    { key: 'modules', title: 'Documentation modules' },
+    { key: 'model', title: 'AI provider' }
+  ];
+
+  function resetChecklist() {
+    dom.setupChecklist.innerHTML = CHECKS.map(c => `
+      <li class="waiting" data-check="${c.key}">
+        <span class="check-icon"></span>
+        <div><div class="check-title">${c.title}</div><div class="check-detail">Waiting</div></div>
+      </li>`).join('');
+  }
+
+  function setCheck(key, status, detail) {
+    const item = dom.setupChecklist.querySelector(`[data-check="${key}"]`);
+    if (!item) return;
+    item.className = status;
+    const icons = { ok: ICON.check, warn: ICON.warn, error: ICON.cross };
+    item.querySelector('.check-icon').innerHTML = icons[status] || '';
+    item.querySelector('.check-detail').textContent = detail || '';
+  }
+
+  async function loadSettings() {
+    let record = null;
+    if (state.isZohoEmbedded) {
+      try { record = await findExistingSettingsRecord(); } catch (_) { record = null; }
+    }
+    if (record) {
+      state.settingsRecordId = record.id || null;
+      state.settings.docsAgentConnection = record.Docs_Agent_Connection || state.settings.docsAgentConnection;
+      state.settings.workdriveConnection = record.Workdrive_Connection || state.settings.workdriveConnection;
+      state.settings.workdriveFolder = record.Workdrive_Folder_Id || state.settings.workdriveFolder;
+      if (['admin', 'developer', 'client'].includes(record.Audience)) {
+        state.audience = record.Audience;
+        localStorage.setItem('livingdocs.audience', state.audience);
+      }
+      applyRecordAi(record);
+    }
+    refreshAiFromKeys();
+    return { record };
+  }
+
+  function findCustomModule(modules, apiName) {
+    const key = apiName.toLowerCase().replace(/_/g, '');
+    return (modules || []).find((m) => [m.api_name, m.module_name, m.plural_label]
+      .some(v => String(v || '').toLowerCase().replace(/[_\s]/g, '') === key)) || null;
+  }
+
+  function hasCustomModule(modules, apiName) {
+    return !!findCustomModule(modules, apiName);
+  }
+
+  async function runSetupCheck(manual) {
+    // A reload with saved settings goes straight to the workflows. The checklist
+    // is only shown when something required is missing, or when the admin asks.
+    if (manual) showScreen('setup');
+    resetChecklist();
+    dom.setupTitle.textContent = 'Checking your setup';
+    dom.setupSubtitle.textContent = 'Confirming the Zoho CRM connection, saved settings and documentation modules before loading your workflows.';
+    dom.setupForm.hidden = true;
+    syncSetupActions();
+    dom.btnSetupContinue.disabled = true;
+    setBusy(dom.btnSetupRetry, true);
+
+    let errors = 0;
+    let warnings = 0;
+    const fail = (key, detail) => { errors += 1; setCheck(key, 'error', detail); };
+    const warn = (key, detail) => { warnings += 1; setCheck(key, 'warn', detail); };
+
+    try {
+      setCheck('settings', 'pending', 'Looking for the Living_Docs_Settings record');
+      const { record } = await loadSettings();
+
+      setCheck('crm', 'pending', `Calling GET /crm/v8/settings/modules with "${conn()}"`);
+      let modules = [];
+      if (!canUseZohoConnection()) {
+        fail('crm', 'Open this widget from inside Zoho CRM. Live CRM data is only available there.');
+        setOrg('Not inside Zoho CRM', 'error');
+      } else {
+        try {
+          modules = await fetchCrmModules(conn());
+          state.crmModules = modules;
+          setCheck('crm', 'ok', `"${conn()}" is working. ${modules.filter(isScannableModule).length} modules are readable.`);
+          setOrg('Zoho CRM connected', 'ok');
+        } catch (err) {
+          fail('crm', `"${conn()}" failed: ${err.message || err}`);
+          setOrg('Connection problem', 'error');
+        }
+      }
+
+      if (record) setCheck('settings', 'ok', `Loaded from Living_Docs_Settings record ${record.id}.`);
+      else fail('settings', 'No Living_Docs_Settings record yet. Enter the details below and install.');
+
+      if (!modules.length) {
+        fail('modules', 'Could not be checked until the CRM connection works.');
+      } else {
+        resolveLivingDocsModules(modules);
+        const missing = LIVING_DOCS_MODULES.map(m => m.apiName).filter(name => !hasCustomModule(modules, name));
+        if (missing.length) fail('modules', `Missing: ${missing.join(', ')}. Install creates them.`);
+        else setCheck('modules', 'ok', 'Living_Docs_Settings and Living_Docs_Documents are installed.');
+      }
+
+      const savedKey = state.ai.provider && state.aiKeys[state.ai.provider];
+      if (savedKey) {
+        setCheck('model', 'ok', `${aiName()} (${state.ai.model}). API key saved on Living_Docs_Settings.`);
+      } else if (state.hasApiKey) {
+        setCheck('model', 'ok', `${aiName()} (${state.ai.model}) with a saved API key.`);
+      } else if (state.ai.provider) {
+        warn('model', `${aiName()} is selected but has no API key. Open the AI provider tab and paste it.`);
+      } else {
+        warn('model', 'No AI provider yet. Open the AI provider tab and add the Claude or Cursor API key.');
+      }
+    } finally {
+      setBusy(dom.btnSetupRetry, false);
+    }
+
+    const aiMissing = !aiIsConfigured();
+    if (errors || aiMissing) {
+      showScreen('setup');
+      dom.setupTitle.textContent = errors ? 'Finish setting up' : 'Add the AI provider';
+      dom.setupSubtitle.textContent = errors
+        ? 'Connection is tab 1. The AI provider is tab 2. Submit saves both on the Living Docs Settings record.'
+        : 'Open the AI provider tab, choose Claude or Cursor, paste its API key, then Submit.';
+      showSetupEditor(errors ? 1 : 2);
+      dom.btnSetupContinue.disabled = errors > 0;
       return;
     }
 
-    dom.btnExportWorkDrive.disabled = true;
-    dom.btnExportWorkDrive.textContent = 'Uploading to WorkDrive...';
-
-    try {
-      const resp = await apiCall('/workdrive/export', {
-        title: 'Zoho_CRM_Living_System_Documentation',
-        folder_id: dom.settingsWorkDriveFolder?.value || 'folder_living_docs_crm',
-        markdown: state.generatedMarkdown
-      });
-
-      alert(`✅ Documentation exported to Zoho WorkDrive successfully!\nFile: ${resp.file_name || 'Zoho_System_Docs.pdf'}\nLink: ${resp.link || 'https://workdrive.zoho.com'}`);
-    } catch (err) {
-      alert('Export failed: ' + err.message);
-    } finally {
-      dom.btnExportWorkDrive.disabled = false;
-      dom.btnExportWorkDrive.textContent = '☁️ Export to WorkDrive';
-    }
-  }
-
-  // ==========================================
-  // 3. DRIFT DETECTION & VISUAL DIFF ENGINE
-  // ==========================================
-  async function checkDrift() {
-    dom.btnRunDriftCheck.disabled = true;
-    dom.btnRunDriftCheck.innerHTML = '<span>Comparing Hashes...</span>';
-
-    try {
-      const resp = await apiCall('/drift', {});
-      const drift = resp.drift || resp;
-      state.driftReport = drift;
-
-      if (drift.is_drift_detected && drift.total_changes > 0) {
-        // Update Banner & Nav Badge
-        dom.driftBannerAlert.className = 'drift-banner-alert';
-        dom.driftBannerIcon.textContent = '⚠️';
-        dom.driftBannerTitle.textContent = `${drift.total_changes} Schema & Automation Drift Event(s) Detected`;
-        dom.driftBannerDesc.textContent = `Your Zoho configuration has changed. The affected documentation sections are out of sync with reality.`;
-        
-        dom.driftNavBadge.style.display = 'inline-block';
-        dom.driftNavBadge.textContent = drift.total_changes;
-        dom.headerDriftPill.className = 'status-pill warning';
-        dom.headerDriftLabel.textContent = `Drift: ${drift.total_changes} Outdated`;
-        dom.btnTargetedRegenerate.disabled = false;
-
-        // Populate Changed Components Table
-        let rows = '';
-        (drift.changes || []).forEach(c => {
-          let badgeClass = 'badge-yellow';
-          if (c.type.includes('added')) badgeClass = 'badge-green';
-          if (c.type.includes('removed')) badgeClass = 'badge-red';
-
-          rows += `
-            <tr>
-              <td><strong>${escapeHtml(c.module)}</strong></td>
-              <td><span class="badge ${badgeClass}">${escapeHtml(c.type.replace(/_/g, ' '))}</span></td>
-              <td><code>${escapeHtml(c.component_id)}</code></td>
-              <td>${escapeHtml(c.detail)}</td>
-              <td><strong>${escapeHtml(drift.affected_sections.join(', '))}</strong></td>
-            </tr>
-          `;
-        });
-        dom.driftChangesTableBody.innerHTML = rows;
-
-        // Populate Visual Diff View
-        dom.diffOldContent.innerHTML = `
-<span class="diff-del">- Field Dictionary: Deals (${state.activeSnapshot?.stats?.total_fields || 29} fields)</span>
-<span class="diff-del">- Workflow: High Value Alert (Amount >= $50k)</span>
-<span class="diff-del">- Document Version: Baseline (Clean)</span>`;
-
-        dom.diffNewContent.innerHTML = `
-<span class="diff-add">+ Field Dictionary: Updated with added fields / attributes</span>
-<span class="diff-add">+ Workflow: High Value Alert criteria updated</span>
-<span class="diff-add">+ Document Version: Synced Baseline (v2.1)</span>`;
-
-        dom.driftChangesSection.style.display = 'block';
-      } else {
-        // Clean State
-        dom.driftBannerAlert.className = 'drift-banner-alert clean';
-        dom.driftBannerIcon.textContent = '✓';
-        dom.driftBannerTitle.textContent = 'All Documents Synchronized';
-        dom.driftBannerDesc.textContent = 'All CRM fields, workflows, and blueprints match the baseline snapshot. Zero documentation drift detected.';
-        dom.driftNavBadge.style.display = 'none';
-        dom.headerDriftPill.className = 'status-pill success';
-        dom.headerDriftLabel.textContent = 'Docs: Synced';
-        dom.btnTargetedRegenerate.disabled = true;
-        dom.driftChangesSection.style.display = 'none';
-      }
-    } catch (err) {
-      console.error('Drift check failed:', err);
-    } finally {
-      dom.btnRunDriftCheck.disabled = false;
-      dom.btnRunDriftCheck.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Check Drift Now';
-    }
-  }
-
-  async function targetedRegenerate() {
-    dom.btnTargetedRegenerate.disabled = true;
-    dom.btnTargetedRegenerate.textContent = '⚡ Regenerating Affected Sections...';
-
-    try {
-      const resp = await apiCall('/regenerate', {
-        affected_components: state.driftReport?.changes?.map(c => c.component_id) || []
-      });
-
-      state.generatedMarkdown = resp.markdown;
-      renderMarkdownOutput(state.generatedMarkdown);
-
-      // Re-run drift check to verify resolution
-      await checkDrift();
-      alert('✅ Affected documentation sections regenerated! New documented baseline saved.');
-      switchTab('tab-docs');
-    } catch (err) {
-      alert('Regeneration failed: ' + err.message);
-    } finally {
-      dom.btnTargetedRegenerate.textContent = '⚡ Regenerate Affected Only';
-    }
-  }
-
-  // ==========================================
-  // 4. ASK AI ASSISTANT
-  // ==========================================
-  async function sendChatMessage() {
-    const query = dom.chatInputField.value.trim();
-    if (!query) return;
-
-    dom.chatInputField.value = '';
-    appendChatBubble('user', query);
-    dom.btnSendChat.disabled = true;
-
-    // Loading indicator bubble
-    const loadingBubble = appendChatBubble('assistant', '<em>Analyzing CRM configuration snapshot...</em>');
-
-    try {
-      const resp = await apiCall('/ask', { question: query });
-      const answer = resp.answer || 'No answer received.';
-      if (typeof marked !== 'undefined') {
-        loadingBubble.innerHTML = marked.parse(answer);
-      } else {
-        loadingBubble.innerHTML = `<p>${escapeHtml(answer)}</p>`;
-      }
-    } catch (err) {
-      loadingBubble.innerHTML = `<p style="color:var(--danger);">Error: ${escapeHtml(err.message)}</p>`;
-    } finally {
-      dom.btnSendChat.disabled = false;
-      dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
-    }
-  }
-
-  function appendChatBubble(role, htmlOrText) {
-    const bubble = document.createElement('div');
-    bubble.className = `chat-bubble ${role}`;
-    bubble.innerHTML = htmlOrText;
-    dom.chatMessages.appendChild(bubble);
-    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
-    return bubble;
-  }
-
-  // ==========================================
-  // 5. FUNCTION BUILDER & DELUGE STUDIO
-  // ==========================================
-  async function generateFunction() {
-    const prompt = dom.builderPrompt.value.trim();
-    if (!prompt) {
-      alert('Please describe what automation function you want to build.');
+    if (!manual) {
+      enterFlow();
       return;
     }
 
-    dom.btnGenerateFunction.disabled = true;
-    dom.btnGenerateFunction.textContent = 'Writing Deluge Code & Static Safety Checks...';
-
-    try {
-      const payload = {
-        prompt,
-        module: dom.builderModule.value,
-        trigger: dom.builderTrigger.value
-      };
-
-      const resp = await apiCall('/function/generate', payload);
-      const result = resp.result || resp;
-
-      dom.builderFunctionTitle.textContent = `${result.function_name || 'custom_function'}.dg`;
-      dom.builderCodeOutput.textContent = result.code || '// Error generating code';
-      
-      if (result.documentation_markdown) {
-        dom.builderDocOutput.innerHTML = marked ? marked.parse(result.documentation_markdown) : result.documentation_markdown;
-        dom.builderAutoDocWrapper.style.display = 'block';
-      }
-    } catch (err) {
-      alert('Function generation error: ' + err.message);
-    } finally {
-      dom.btnGenerateFunction.disabled = false;
-      dom.btnGenerateFunction.textContent = 'Generate Deluge Function';
+    showScreen('setup');
+    dom.btnSetupContinue.disabled = false;
+    if (warnings) {
+      dom.setupTitle.textContent = 'Ready, with notes';
+      dom.setupSubtitle.textContent = 'You can continue now. The notes below only matter for later steps.';
+    } else {
+      dom.setupTitle.textContent = 'Everything is ready';
+      dom.setupSubtitle.textContent = 'Loading your workflows…';
+      setTimeout(enterFlow, 700);
     }
   }
 
-  function copyDelugeCode() {
-    const code = dom.builderCodeOutput.textContent;
-    navigator.clipboard.writeText(code).then(() => {
-      dom.btnCopyDelugeCode.textContent = '✓ Copied!';
-      setTimeout(() => { dom.btnCopyDelugeCode.textContent = 'Copy Code'; }, 2000);
+  function showSetupTab(tab) {
+    state.setupTab = tab === 2 ? 2 : 1;
+    document.querySelectorAll('[data-setup-panel]').forEach((panel) => {
+      panel.hidden = Number(panel.dataset.setupPanel) !== state.setupTab;
+    });
+    document.querySelectorAll('[data-setup-tab]').forEach((btn) => {
+      const on = Number(btn.dataset.setupTab) === state.setupTab;
+      btn.classList.toggle('current', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    syncSetupActions();
+  }
+
+  function syncSetupActions() {
+    const editing = Boolean(dom.setupForm && !dom.setupForm.hidden);
+    const tab = state.setupTab || 1;
+    if (dom.btnSetupBack) dom.btnSetupBack.hidden = !editing || tab !== 2;
+    if (dom.btnSetupNext) dom.btnSetupNext.hidden = !editing || tab !== 1;
+    if (dom.btnSetupInstall) dom.btnSetupInstall.hidden = !editing || tab !== 2;
+    if (dom.btnSetupContinue) dom.btnSetupContinue.hidden = editing;
+  }
+
+  function showSetupEditor(tab) {
+    dom.setupDocsConn.value = state.settings.docsAgentConnection;
+    dom.setupWdConn.value = state.settings.workdriveConnection;
+    dom.setupWdFolder.value = state.settings.workdriveFolder === 'folder_living_docs_crm' ? '' : state.settings.workdriveFolder;
+    fillSetupAiForm();
+    dom.setupForm.hidden = false;
+    showSetupTab(tab || 1);
+  }
+
+  function appendSetupLog(message, type = 'info') {
+    const line = document.createElement('div');
+    line.className = `log-${type}`;
+    line.textContent = `${new Date().toLocaleTimeString()}  ${stripEmoji(message)}`;
+    dom.setupLog.appendChild(line);
+    dom.setupLog.scrollTop = dom.setupLog.scrollHeight;
+  }
+
+  async function installAndVerify() {
+    state.settings.docsAgentConnection = dom.setupDocsConn.value.trim() || 'docsagent_connection';
+    state.settings.workdriveConnection = dom.setupWdConn.value.trim() || 'workdrive_connection';
+    state.settings.workdriveFolder = dom.setupWdFolder.value.trim();
+    captureSetupAi();
+
+    dom.setupLogWrap.hidden = false;
+    dom.setupLogWrap.open = true;
+    dom.setupLog.innerHTML = '';
+    setBusy(dom.btnSetupInstall, true);
+    try {
+      if (canUseZohoConnection()) {
+        const saved = await autoProvisionCustomModules(true, appendSetupLog);
+        if (saved && saved.ok && (state.aiKeys.anthropic || state.aiKeys.cursor)) {
+          appendSetupLog('API keys saved on the Living_Docs_Settings record.', 'ok');
+        } else if (saved && !saved.ok) {
+          showToast(`Settings were not saved: ${saved.message || 'unknown error'}`, 'error');
+        }
+      } else {
+        appendSetupLog('Not running inside Zoho CRM, so modules cannot be installed from here.', 'warn');
+      }
+    } catch (err) {
+      appendSetupLog(`Install stopped: ${err.message || err}`, 'error');
+    } finally {
+      setBusy(dom.btnSetupInstall, false);
+    }
+    await runSetupCheck();
+  }
+
+  // Referenced by autoProvisionCustomModules after the settings row is written.
+  function renderSettingsRecordStatus() {
+    if (!dom.settingsRecordNote) return;
+    dom.settingsRecordNote.textContent = state.settingsRecordId
+      ? `Stored in Living_Docs_Settings record ${state.settingsRecordId}. Saving updates that record.`
+      : 'Saving creates the Living_Docs_Settings record.';
+  }
+
+  function enterFlow() {
+    if (dom.screenFlow.classList.contains('active')) return;
+    showScreen('flow');
+    goToStep(1);
+    scanCrm(false);
+  }
+
+  // ==========================================
+  // STEPPER
+  // ==========================================
+  function goToStep(step) {
+    if (step > state.maxStep) return;
+    state.step = step;
+    document.querySelectorAll('.step-panel').forEach(p => p.classList.toggle('active', p.id === `step${step}`));
+    renderStepper();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function limitSteps(max) {
+    state.maxStep = max;
+    renderStepper();
+  }
+
+  function renderStepper() {
+    dom.stepper.querySelectorAll('li[data-step]').forEach((item) => {
+      const step = Number(item.dataset.step);
+      const done = step < state.maxStep && step !== state.step;
+      item.classList.toggle('current', step === state.step);
+      item.classList.toggle('done', done);
+      item.classList.toggle('reachable', step <= state.maxStep && step !== state.step);
+      item.querySelector('.num').innerHTML = done ? ICON.check.replace('<svg ', '<svg width="12" height="12" ') : String(step);
     });
   }
 
-  async function deployFunction() {
-    dom.btnDeployFunction.disabled = true;
-    dom.btnDeployFunction.textContent = 'Deploying & Updating Living Docs...';
+  // ==========================================
+  // DOCUMENTATION LOG (Living_Docs_Documents)
+  // ==========================================
+  const LOG_TEXT_LIMIT = 30000;
 
+  function zohoDateTime(value) {
+    const d = value ? new Date(value) : new Date();
+    if (Number.isNaN(d.getTime())) return zohoDateTime();
+    const pad = n => String(Math.floor(Math.abs(n))).padStart(2, '0');
+    const off = -d.getTimezoneOffset();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${off >= 0 ? '+' : '-'}${pad(off / 60)}:${pad(off % 60)}`;
+  }
+
+  async function sourceHash(source) {
+    const text = String(source || '').replace(/\s+/g, '');
+    if (window.crypto?.subtle && window.TextEncoder) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return `fnv-${h.toString(16)}-${text.length}`;
+  }
+
+  async function currentUserInfo() {
+    if (state.currentUser) return state.currentUser;
+    let user = null;
+    if (typeof ZOHO !== 'undefined' && ZOHO.CRM?.CONFIG?.getCurrentUser) {
+      const resp = await withTimeout(ZOHO.CRM.CONFIG.getCurrentUser(), 4000, null);
+      user = resp?.users?.[0] || (resp?.full_name || resp?.email ? resp : null);
+    }
+    state.currentUser = {
+      id: user?.id ? String(user.id) : '',
+      name: user?.full_name || [user?.first_name, user?.last_name].filter(Boolean).join(' ') || '',
+      email: user?.email || ''
+    };
+    return state.currentUser;
+  }
+
+  function userLabel(u) {
+    if (!u || (!u.name && !u.email)) return 'Unknown user';
+    return u.name && u.email ? `${u.name} (${u.email})` : (u.name || u.email);
+  }
+
+  function canWriteRecords() {
+    return state.isZohoEmbedded && typeof ZOHO !== 'undefined' && !!ZOHO.CRM?.API?.insertRecord;
+  }
+
+  async function fetchAllRecords(entity, maxPages = 5) {
+    const out = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const resp = await ZOHO.CRM.API.getAllRecords({ Entity: entity, sort_order: 'desc', per_page: 200, page });
+      const rows = Array.isArray(resp?.data) ? resp.data : [];
+      out.push(...rows);
+      if (rows.length < 200 || !resp?.info?.more_records) break;
+    }
+    return out;
+  }
+
+  function splitModules(value) {
+    return String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  function recordTime(rec, field) {
+    return new Date(rec[field] || rec.Created_Time || 0).getTime() || 0;
+  }
+
+  async function loadDocLogs() {
+    if (!canWriteRecords()) {
+      state.docLog = { ok: false, byItem: {}, byFunction: {}, byModule: {}, records: [] };
+      return;
+    }
+    let docs = [];
+    let error = '';
     try {
-      const resp = await apiCall('/function/deploy', {
-        function_name: dom.builderFunctionTitle.textContent.replace('.dg', ''),
-        code: dom.builderCodeOutput.textContent,
-        documentation_markdown: dom.builderDocOutput.innerHTML
-      });
-
-      alert(`✅ ${resp.message || 'Function deployed and added to Living Documentation!'}`);
-      await runFullScan();
-      switchTab('tab-inventory');
+      docs = await fetchAllRecords(logModuleApi('documents'));
     } catch (err) {
-      alert('Deploy failed: ' + err.message);
-    } finally {
-      dom.btnDeployFunction.disabled = false;
-      dom.btnDeployFunction.textContent = '🚀 Deploy to CRM & Add to Living Docs';
+      error = describeSdkError(err);
+    }
+    const byItem = {};
+    const byFunction = {};
+    const byModule = {};
+    const newer = (current, rec) => !current || Number(rec.version || 0) >= Number(current.version || 0);
+    docs.slice().sort((a, b) => recordTime(a, 'Generated_At') - recordTime(b, 'Generated_At')).forEach((rec) => {
+      const id = String(rec.Item_Id || '');
+      const at = rec.Generated_At || rec.Created_Time;
+      // Older installs also wrote one record per function; those only feed the change check.
+      if (rec.Item_Type === 'Function') {
+        const entry = { version: rec.Doc_Version, at, hash: rec.Source_Hash || '' };
+        if (id && newer(byFunction[id], entry)) byFunction[id] = entry;
+        return;
+      }
+      if (id && (!byItem[id] || Number(rec.Doc_Version || 0) >= Number(byItem[id].Doc_Version || 0))) byItem[id] = rec;
+      parseFunctionHashes(rec.Related_Items).forEach(({ key, hash }) => {
+        const entry = { version: rec.Doc_Version, at, hash };
+        if (newer(byFunction[key], entry)) byFunction[key] = entry;
+      });
+      splitModules(rec.CRM_Module).forEach((mod) => {
+        const g = byModule[mod] || { count: 0, last: null };
+        g.count += 1;
+        if (!g.last || recordTime(rec, 'Generated_At') >= recordTime(g.last, 'Generated_At')) g.last = rec;
+        byModule[mod] = g;
+      });
+    });
+    state.docLog = { ok: !error, error, byItem, byFunction, byModule, records: docs };
+  }
+
+  // Related_Items on a workflow record lists its functions, one per line: "name [key] sha256:hash".
+  function functionHashLine(fn, hash) {
+    return `${fn.api_name || fn.name || 'function'} [${fnKey(fn)}] sha256:${hash}`;
+  }
+
+  function parseFunctionHashes(text) {
+    const out = [];
+    String(text || '').split('\n').forEach((line) => {
+      const m = /\[([^\]]+)\]\s+sha256:(\S+)/.exec(line);
+      if (m) out.push({ key: m[1], hash: m[2] });
+    });
+    return out;
+  }
+
+  function insertResults(resp, count) {
+    const rows = Array.isArray(resp?.data) ? resp.data : [];
+    return Array.from({ length: count }, (_, i) => {
+      const row = rows[i] || {};
+      const ok = row.code === 'SUCCESS' || row.status === 'success';
+      return { ok, id: row.details?.id || null, message: ok ? 'Saved' : (row.message || row.code || 'CRM did not confirm the record') };
+    });
+  }
+
+  function clip(text, limit = LOG_TEXT_LIMIT) {
+    const s = String(text || '');
+    return s.length > limit ? `${s.slice(0, limit - 40)}\n… cut off, ${s.length - limit + 40} more characters` : s;
+  }
+
+  // A function whose code differs from the last documented version was edited somewhere else, e.g. in the Zoho editor.
+  async function detectExternalChanges(workflows) {
+    if (!canWriteRecords() || !state.docLog?.ok) return;
+    for (const fn of uniqueFunctions(workflows)) {
+      const r = fnReview(fn);
+      const doc = state.docLog.byFunction[fnKey(fn)];
+      r.docInfo = doc ? { version: doc.version, at: doc.at } : null;
+      r.externalChange = null;
+      if (!doc || !doc.hash) continue;
+      const hash = await sourceHash(fn.source);
+      if (hash === doc.hash) continue;
+      r.externalChange = { version: doc.version, at: fn.modified_time || '', by: fn.modified_by || '' };
+      rerenderFnCard(fn);
+    }
+    renderModuleTable();
+  }
+
+  async function writeDocRecord(entity, row, existingId) {
+    try {
+      const resp = existingId
+        ? await ZOHO.CRM.API.updateRecord({ Entity: entity, APIData: { id: existingId, ...row }, Trigger: [] })
+        : await ZOHO.CRM.API.insertRecord({ Entity: entity, APIData: row, Trigger: [] });
+      const [res] = insertResults(resp, 1);
+      return { ...res, id: res.id || existingId || null };
+    } catch (err) {
+      return { ok: false, id: null, message: describeSdkError(err?.data?.[0] || err) };
     }
   }
 
-  // ==========================================
-  // 6. SETTINGS & DEMO SIMULATOR
-  // ==========================================
-  async function saveSettings() {
-    dom.btnSaveSettings.disabled = true;
-    dom.btnSaveSettings.textContent = 'Saving to Custom Module...';
-
+  async function attachPdfToRecord(entity, recordId, file) {
     try {
-      const docsConn = dom.settingsDocsAgentConn ? dom.settingsDocsAgentConn.value.trim() : state.settings.docsAgentConnection;
-      const wdConn = dom.settingsWorkDriveConn ? dom.settingsWorkDriveConn.value.trim() : state.settings.workdriveConnection;
+      const resp = await ZOHO.CRM.API.attachFile({ Entity: entity, RecordID: recordId, File: { Name: file.name, Content: file } });
+      const row = Array.isArray(resp?.data) ? resp.data[0] : resp;
+      const ok = row?.code === 'SUCCESS' || row?.status === 'success';
+      return { ok, message: ok ? '' : (row?.message || row?.code || 'CRM did not confirm the attachment') };
+    } catch (err) {
+      return { ok: false, message: describeSdkError(err?.data?.[0] || err) };
+    }
+  }
 
-      const payload = {
-        claudeApiKey: dom.settingsClaudeKey ? dom.settingsClaudeKey.value : '',
-        claudeModel: dom.settingsClaudeModel ? dom.settingsClaudeModel.value : state.settings.claudeModel,
-        workdriveDefaultFolder: dom.settingsWorkDriveFolder ? dom.settingsWorkDriveFolder.value : state.settings.workdriveFolder,
-        docsAgentConnection: docsConn,
-        workdriveConnection: wdConn
+  async function logDocumentation(pdfBytes) {
+    if (!canWriteRecords()) return { ok: false, rows: [], message: 'Records are only written inside Zoho CRM. Use Download PDF to keep the file.' };
+    await loadDocLogs().catch(() => null);
+    if (!state.docLog.ok) {
+      return { ok: false, rows: [], message: `${logModuleApi('documents')} could not be read (${state.docLog.error || 'unknown error'}). Run Install from the setup check.` };
+    }
+    const g = state.generated;
+    const entity = logModuleApi('documents');
+    const pdfFile = new File([pdfBytes], g.fileName, { type: 'application/pdf' });
+    const user = await currentUserInfo();
+    const base = {
+      File_Name: g.fileName,
+      Generated_By: g.generatedBy || aiName(),
+      Generated_At: zohoDateTime(g.at),
+      Generated_By_User: userLabel(user),
+      Audience: state.audience,
+      Masked_Values: maskedValueCount()
+    };
+    const nextVersion = id => Number(state.docLog.byItem[id]?.Doc_Version || 0) + 1;
+    const items = [];
+    for (const wf of state.reviewWorkflows) {
+      const itemId = String(wf.id);
+      const version = nextVersion(itemId);
+      const fns = wf.function_code || [];
+      const hashLines = [];
+      const snapshots = [];
+      let masked = 0;
+      for (const fn of fns) {
+        if (!fn.source) {
+          hashLines.push(`${fn.api_name || fn.name || 'function'} [${fnKey(fn)}] (code not loaded)`);
+          continue;
+        }
+        const r = fnReview(fn).result ? fnReview(fn) : runFnReview(fn);
+        hashLines.push(functionHashLine(fn, await sourceHash(fn.source)));
+        masked += r.result.mask.entries.length;
+        if (!fn.source_truncated) snapshots.push(`// ===== ${fn.api_name || fn.name} =====\n${r.result.mask.masked}`);
+      }
+      items.push({
+        label: wf.name, type: 'Workflow', version,
+        row: {
+          ...base,
+          Name: `v${version} · ${wf.name}`.slice(0, 120),
+          Item_Type: 'Workflow', CRM_Module: wf.module || '', Item_Name: wf.name, Item_Id: itemId,
+          Doc_Version: version,
+          Related_Items: clip(hashLines.join('\n'), 2000),
+          Masked_Values: masked,
+          Source_Hash: await sourceHash(fns.map(f => f.source || '').join('\n')),
+          Source_Snapshot: clip(snapshots.join('\n\n'))
+        }
+      });
+    }
+    // A retry after a partial failure reuses the records this document already created instead of adding new versions.
+    g.savedRecords = g.savedRecords || {};
+    const rows = [];
+    for (const item of items) {
+      const prev = g.savedRecords[item.row.Item_Id];
+      const res = prev ? { ok: true, id: prev.id } : await writeDocRecord(entity, item.row, null);
+      if (res.ok && res.id && !prev) g.savedRecords[item.row.Item_Id] = { id: res.id, version: item.version, attached: false };
+      const saved = g.savedRecords[item.row.Item_Id];
+      const attach = !res.ok || !res.id ? { ok: false, message: res.message }
+        : saved.attached ? { ok: true, message: '' }
+          : await attachPdfToRecord(entity, res.id, pdfFile);
+      if (saved && attach.ok) saved.attached = true;
+      rows.push({
+        label: item.label,
+        type: item.type,
+        version: saved ? saved.version : item.version,
+        action: 'Created',
+        id: res.id,
+        ok: res.ok && attach.ok,
+        saved: res.ok,
+        attached: attach.ok,
+        message: res.ok ? attach.message : res.message
+      });
+    }
+    await loadDocLogs().catch(() => null);
+    renderModuleTable();
+    const failed = rows.filter(r => !r.ok);
+    return { ok: !failed.length, rows, entity, message: failed.length ? `${failed[0].label}: ${failed[0].message}` : '' };
+  }
+
+  // ==========================================
+  // STEP 1: OVERVIEW
+  // ==========================================
+  const LAST_SCAN_KEY = 'livingdocs.lastScan';
+
+  function setKpisLoading(loading) {
+    document.querySelectorAll('.kpi-card').forEach(card => card.classList.toggle('loading', loading));
+  }
+
+  function renderKpi(id, value, previous, fallbackSub) {
+    const card = $(id);
+    card.classList.remove('loading');
+    card.querySelector('.kpi-value').textContent = Number(value || 0).toLocaleString();
+    const delta = card.querySelector('.kpi-delta');
+    const sub = card.querySelector('.kpi-sub');
+    if (previous == null) {
+      delta.className = 'kpi-delta';
+      delta.innerHTML = '';
+      sub.textContent = fallbackSub;
+      return;
+    }
+    const diff = value - previous;
+    if (diff === 0) {
+      delta.className = 'kpi-delta flat';
+      delta.textContent = 'No change';
+    } else {
+      const pct = previous ? Math.abs((diff / previous) * 100) : 100;
+      delta.className = `kpi-delta ${diff > 0 ? 'up' : 'down'}`;
+      delta.innerHTML = `${diff > 0 ? ICON.up : ICON.down} ${pct.toFixed(1)}%`;
+    }
+    sub.textContent = `vs. ${Number(previous).toLocaleString()} last scan`;
+  }
+
+  function renderKpis() {
+    const modules = state.crmModules.filter(isScannableModule).length;
+    const workflows = state.allWorkflowsList.length;
+    const functions = (state.functionCatalog || []).length;
+    const active = state.allWorkflowsList.filter(wf => wf.status === 'active').length;
+    const withFn = state.allWorkflowsList.filter(wf => wf.fnCount > 0).length;
+
+    let previous = null;
+    try { previous = JSON.parse(localStorage.getItem(`${LAST_SCAN_KEY}.${conn()}`) || 'null'); } catch (_) { previous = null; }
+    const prev = (key) => (previous && typeof previous[key] === 'number' ? previous[key] : null);
+
+    renderKpi('kpiModules', modules, prev('modules'), 'Readable through the CRM connection');
+    renderKpi('kpiWorkflows', workflows, prev('workflows'), `${withFn} call a custom function`);
+    renderKpi('kpiFunctions', functions, prev('functions'), state.functionCatalogError ? 'Function list could not be read' : 'Deluge and other runtimes');
+    renderKpi('kpiActive', active, prev('active'), workflows ? `${Math.round((active / workflows) * 100)}% of all rules` : 'No rules yet');
+
+    localStorage.setItem(`${LAST_SCAN_KEY}.${conn()}`, JSON.stringify({ modules, workflows, functions, active, at: Date.now() }));
+  }
+
+  function moduleLabel(apiName) {
+    const mod = state.crmModules.find(m => m.api_name === apiName);
+    return (mod && (mod.plural_label || mod.singular_label)) || apiName;
+  }
+
+  function renderModuleTable() {
+    const groups = new Map();
+    state.allWorkflowsList.forEach((wf) => {
+      const key = wf.module || 'Unknown';
+      const g = groups.get(key) || { module: key, rules: 0, active: 0, withFn: 0 };
+      g.rules += 1;
+      if (wf.status === 'active') g.active += 1;
+      if (wf.fnCount > 0) g.withFn += 1;
+      groups.set(key, g);
+    });
+    const rows = [...groups.values()].sort((a, b) => b.rules - a.rules);
+    const logReady = state.docLog && state.docLog.ok;
+    dom.moduleTableBody.innerHTML = rows.length ? rows.map((g) => {
+      const label = moduleLabel(g.module);
+      const doc = logReady ? state.docLog.byModule[g.module] : null;
+      const docCell = !state.docLog ? '<span class="muted small">Loading…</span>'
+        : !logReady ? '<span class="muted small">Log not available</span>'
+          : doc ? `<div class="cell-title">${escapeHtml(formatDate(doc.last.Generated_At || doc.last.Created_Time))}</div><div class="cell-sub">${escapeHtml(doc.last.Item_Name || '')} · v${escapeHtml(doc.last.Doc_Version || 1)} · ${plural(doc.count, 'record')}</div>`
+            : '<span class="muted small">Not documented yet</span>';
+      return `
+      <tr class="clickable" data-module="${escapeHtml(g.module)}">
+        <td><div class="cell-title">${escapeHtml(label)}</div>${label !== g.module ? `<div class="cell-sub">${escapeHtml(g.module)}</div>` : ''}</td>
+        <td class="num">${g.rules}</td>
+        <td class="num">${g.active}</td>
+        <td class="num">${g.withFn}</td>
+        <td>${docCell}</td>
+        <td class="chevron">${ICON.chevron}</td>
+      </tr>`;
+    }).join('') : '<tr class="empty-row"><td colspan="6">No workflow rules were returned by Zoho CRM.</td></tr>';
+  }
+
+  async function scanCrm(force) {
+    if (!canUseZohoConnection()) {
+      showToast('Open this widget inside Zoho CRM to load live data.', 'warning');
+      return;
+    }
+    if (state.scanning) return;
+    state.scanning = true;
+    setBusy(dom.btnRescan, true);
+    setKpisLoading(true);
+    dom.scanStatus.textContent = 'Loading modules, workflow rules and functions from Zoho CRM…';
+    dom.moduleTableBody.innerHTML = `<tr class="empty-row"><td colspan="6">${loadingBlock('Reading workflow rules…')}</td></tr>`;
+
+    const docsConn = conn();
+    const [modulesRes, rulesRes, catalogRes, orgRes] = await Promise.allSettled([
+      state.crmModules.length && !force ? Promise.resolve(state.crmModules) : fetchCrmModules(docsConn),
+      fetchAllWorkflowRulePages(docsConn).then(rules => enrichWorkflowRules(docsConn, rules)),
+      fetchFunctionCatalog(docsConn),
+      fetchOrgLabel(docsConn),
+      loadDocLogs().catch(err => console.warn('[Living Docs] logs', err))
+    ]);
+
+    if (modulesRes.status === 'fulfilled') state.crmModules = modulesRes.value || [];
+    if (catalogRes.status === 'fulfilled') {
+      state.functionCatalog = catalogRes.value || [];
+      state.functionCatalogError = '';
+    } else {
+      state.functionCatalog = [];
+      state.functionCatalogError = catalogRes.reason?.message || String(catalogRes.reason);
+    }
+    if (orgRes.status === 'fulfilled' && orgRes.value) setOrg(orgRes.value, 'ok');
+
+    if (rulesRes.status === 'fulfilled') {
+      state.allWorkflowsList = normalizeZohoWorkflows(rulesRes.value || []).map(wf => ({ ...wf, fnCount: collectFunctionActions(wf).length }));
+      renderKpis();
+      renderModuleTable();
+      populateModuleFilter();
+      renderWorkflowTable();
+      dom.scanStatus.textContent = `Updated ${new Date().toLocaleTimeString()} through "${docsConn}".`;
+      if (state.maxStep < 2) limitSteps(2);
+    } else {
+      setKpisLoading(false);
+      const message = rulesRes.reason?.message || String(rulesRes.reason);
+      dom.scanStatus.textContent = 'Workflow rules could not be loaded.';
+      dom.moduleTableBody.innerHTML = `<tr class="empty-row"><td colspan="6">${escapeHtml(message)}<br><span class="small">Check ZohoCRM.settings.workflow_rules.READ on "${escapeHtml(docsConn)}".</span></td></tr>`;
+      showToast(message, 'error');
+    }
+    if (state.functionCatalogError) {
+      showToast(`Function list failed: ${state.functionCatalogError}. Add ZohoCRM.settings.functions.READ.`, 'warning');
+    }
+    setBusy(dom.btnRescan, false);
+    state.scanning = false;
+  }
+
+  // ==========================================
+  // STEP 2: SELECT WORKFLOWS
+  // ==========================================
+  function populateModuleFilter() {
+    const current = dom.wfModuleFilter.value;
+    const modules = [...new Set(state.allWorkflowsList.map(wf => wf.module).filter(Boolean))].sort();
+    dom.wfModuleFilter.innerHTML = '<option value="ALL">All modules</option>' +
+      modules.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(moduleLabel(m))}</option>`).join('');
+    if (modules.includes(current)) dom.wfModuleFilter.value = current;
+  }
+
+  function visibleWorkflows() {
+    const q = dom.wfSearch.value.trim().toLowerCase();
+    const mod = dom.wfModuleFilter.value;
+    const status = dom.wfStatusFilter.value;
+    const fnOnly = dom.wfFunctionsOnly.checked;
+    return state.allWorkflowsList.filter((wf) => {
+      if (mod !== 'ALL' && wf.module !== mod) return false;
+      if (status !== 'ALL' && wf.status !== status) return false;
+      if (fnOnly && !wf.fnCount) return false;
+      if (!q) return true;
+      return [wf.name, wf.criteria, (wf.actions || []).join(' '), wf.module].join(' ').toLowerCase().includes(q);
+    });
+  }
+
+  function renderWorkflowTable() {
+    const rows = visibleWorkflows();
+    dom.wfTableBody.innerHTML = rows.length ? rows.map((wf) => {
+      const selected = state.selectedWorkflowIds.has(wf.id);
+      const actionCount = (wf.actions || []).length;
+      return `
+        <tr data-id="${escapeHtml(wf.id)}" class="${selected ? 'selected' : ''}">
+          <td class="col-check"><input type="checkbox" ${selected ? 'checked' : ''} tabindex="-1" /></td>
+          <td>
+            <div class="cell-title">${escapeHtml(wf.name)}</div>
+            <div class="cell-sub">${escapeHtml(wf.criteria || 'No criteria, runs on every matching record')}</div>
+          </td>
+          <td>${escapeHtml(moduleLabel(wf.module))}</td>
+          <td>${escapeHtml(triggerLabel(wf.trigger_type))}</td>
+          <td>
+            <span class="muted">${actionCount} action${actionCount === 1 ? '' : 's'}</span>
+            ${wf.fnCount ? `<span class="pill pill-blue">${wf.fnCount} function${wf.fnCount === 1 ? '' : 's'}</span>` : ''}
+          </td>
+          <td>${wf.status === 'active' ? '<span class="pill pill-green">Active</span>' : '<span class="pill pill-gray">Inactive</span>'}</td>
+          <td><button type="button" class="btn btn-ghost btn-sm" data-show-rule="${escapeHtml(wf.id)}">Show workflow rule</button></td>
+        </tr>`;
+    }).join('') : '<tr class="empty-row"><td colspan="7">No workflow rules match these filters.</td></tr>';
+    updateSelectionUI(rows);
+  }
+
+  function updateSelectionUI(rows) {
+    const count = state.selectedWorkflowIds.size;
+    dom.selectedCountPill.textContent = `${count} selected`;
+    dom.btnToReview.disabled = count === 0;
+    dom.btnToReview.textContent = count ? `Review ${count} selected` : 'Review selected';
+    const visible = rows || visibleWorkflows();
+    const picked = visible.filter(wf => state.selectedWorkflowIds.has(wf.id)).length;
+    dom.wfCheckAll.checked = visible.length > 0 && picked === visible.length;
+    dom.wfCheckAll.indeterminate = picked > 0 && picked < visible.length;
+  }
+
+  function selectionChanged() {
+    state.generated = null;
+    state.saved = null;
+    if (state.maxStep > 2) limitSteps(2);
+    renderWorkflowTable();
+  }
+
+  // ==========================================
+  // STEP 3: REVIEW CRITERIA AND CODE
+  // ==========================================
+  async function loadWorkflowsWithFunctionCode(workflows) {
+    const hydrated = await Promise.all(workflows.map(wf => hydrateWorkflowRecord(wf)));
+    return attachFunctionCodeToWorkflows(hydrated);
+  }
+
+  async function loadFieldsForModules(workflows) {
+    const modules = [...new Set(workflows.map(wf => wf.module).filter(Boolean))].filter(m => !state.moduleFields[m]);
+    await Promise.all(modules.map(async (mod) => {
+      const fields = await fetchModuleFields(conn(), mod);
+      state.moduleFields[mod] = fields.map(f => ({
+        api_name: f.api_name,
+        label: f.field_label || f.display_label || f.api_name,
+        data_type: f.data_type
+      }));
+    }));
+  }
+
+  function promptSnapshot() {
+    return {
+      modules: Object.entries(state.moduleFields).map(([module, fields]) => ({ module, fields })),
+      stats: {}
+    };
+  }
+
+  async function startReview() {
+    const selected = state.allWorkflowsList.filter(wf => state.selectedWorkflowIds.has(wf.id));
+    if (!selected.length) return;
+    state.generated = null;
+    state.saved = null;
+    state.reviewDocMode = 'details';
+    limitSteps(3);
+    goToStep(3);
+    state.reviewWorkflows = [];
+    dom.btnGenerate.disabled = true;
+    dom.reviewTabs.innerHTML = '';
+    dom.promptSystem.value = '';
+    dom.promptUser.value = '';
+    updatePromptStats();
+    dom.reviewStatus.textContent = `Loading ${selected.length} rule${selected.length === 1 ? '' : 's'} and downloading function code…`;
+    dom.reviewBody.innerHTML = loadingBlock('Downloading function code with GET /crm/v8/settings/functions/{id}/code');
+    try {
+      const loaded = await loadWorkflowsWithFunctionCode(selected);
+      await loadFieldsForModules(loaded).catch(() => null);
+      state.reviewWorkflows = loaded;
+      state.activeReviewId = loaded[0] && loaded[0].id;
+      reviewFunctions(loaded);
+      renderReview();
+      loadDocLogs().then(() => detectExternalChanges(loaded)).catch(err => console.warn('[Living Docs] change detection', err));
+      await buildPrompt();
+    } catch (err) {
+      dom.reviewStatus.textContent = 'The rules could not be loaded.';
+      dom.reviewBody.innerHTML = `<div class="notice error">${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  function functionSummary(workflows) {
+    const all = (workflows || []).flatMap(wf => wf.function_code || []);
+    return { total: all.length, withSource: all.filter(fn => fn.source).length };
+  }
+
+  function actionCard(action, delay) {
+    if (typeof action === 'string') {
+      const split = action.indexOf(':');
+      const kind = /function/i.test(action) ? 'fn' : /field/i.test(action) ? 'field' : /email/i.test(action) ? 'email' : 'other';
+      if (split > 0) return { title: action.slice(split + 1).trim() || action, meta: action.slice(0, split).trim(), kind };
+      return { title: action, meta: '', kind };
+    }
+    const typeRaw = action.type || action.action_type || '';
+    const type = actionTypeLabel(typeRaw);
+    const title = action.name || action.action_name || type;
+    const timing = delay || (/function/i.test(typeRaw) ? 'Instant action' : 'Instant');
+    const kind = /function/i.test(typeRaw) ? 'fn' : /field/i.test(typeRaw) ? 'field' : /email/i.test(typeRaw) ? 'email' : 'other';
+    return { title, meta: `${type} · ${timing}`, kind };
+  }
+
+  function ruleBranches(wf) {
+    const conditions = Array.isArray(wf.conditions) ? wf.conditions : [];
+    if (!conditions.length) {
+      return [{
+        title: 'Condition 1',
+        criteria: displayCriteria(readableCriteria(wf.criteria) || 'No criteria. Runs for every record that matches the trigger.'),
+        actions: (wf.actions || []).map(a => actionCard(a))
+      }];
+    }
+    return conditions.map((c, i) => {
+      const raw = formatCriteria(c.criteria_details && c.criteria_details.criteria);
+      const instant = (c.instant_actions && c.instant_actions.actions) || [];
+      const scheduled = Array.isArray(c.scheduled_actions) ? c.scheduled_actions : [];
+      const actions = instant.map(a => actionCard(a))
+        .concat(scheduled.flatMap(g => (g.actions || []).map(a => actionCard(a, scheduleLabel(g)))));
+      return {
+        title: `Condition ${c.sequence_number || i + 1}`,
+        criteria: displayCriteria(readableCriteria(raw) || 'No criteria. Runs for every record that matches the trigger.'),
+        actions: actions.length ? actions : (wf.actions || []).map(a => actionCard(a))
       };
-
-      // Update local state
-      state.settings.docsAgentConnection = docsConn;
-      state.settings.workdriveConnection = wdConn;
-      state.settings.workdriveFolder = payload.workdriveDefaultFolder;
-      state.settings.claudeModel = payload.claudeModel;
-
-      const resp = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await resp.json();
-      alert('✅ Settings saved to Living_Docs_Settings custom module!');
-    } catch (err) {
-      alert('Save error: ' + err.message);
-    } finally {
-      dom.btnSaveSettings.disabled = false;
-      dom.btnSaveSettings.textContent = '💾 Save Settings to Custom Module';
-    }
+    });
   }
 
-  async function triggerSimulation(scenario, label) {
+  function renderFlowchart(wf) {
+    const branches = ruleBranches(wf);
+    const steps = branches.map((branch, index) => {
+      const last = index === branches.length - 1;
+      const actions = branch.actions.length
+        ? branch.actions.map(a => `<div class="fc-card"><strong>${escapeHtml(a.title)}</strong><span>${escapeHtml(a.meta)}</span></div>`).join('<i class="fc-stem"></i>')
+        : '<div class="fc-card"><strong>No actions</strong><span>Nothing runs for this criteria</span></div>';
+      return `
+        <section class="fc-step">
+          <div class="fc-cond">
+            <strong>${escapeHtml(branch.title)}</strong>
+            <span>${escapeHtml(shortCriteria(branch.criteria))}</span>
+          </div>
+          <i class="fc-neck"></i>
+          <div class="fc-fork">
+            <div class="fc-arm">
+              <span class="fc-yn yes">Yes</span>
+              <i class="fc-stem"></i>
+              ${actions}
+              <i class="fc-stem"></i>
+              <div class="fc-pill">Done</div>
+            </div>
+            <div class="fc-arm">
+              <span class="fc-yn no">No</span>
+              <i class="fc-stem"></i>
+              <div class="fc-pill">${last ? 'Stop' : 'Check next condition'}</div>
+              ${last ? '' : '<i class="fc-rail"></i>'}
+            </div>
+          </div>
+          ${last ? '' : '<div class="fc-join-wrap"><div class="fc-join"></div></div>'}
+        </section>`;
+    }).join('');
+    return `
+      <div class="fc">
+        <div class="fc-pill">Start: ${escapeHtml(triggerLabel(wf.trigger_type))}</div>
+        <i class="fc-stem"></i>
+        ${steps}
+      </div>`;
+  }
+
+  function renderCriteriaDetails(wf) {
+    const branches = ruleBranches(wf);
+    return branches.map((branch, index) => {
+      const last = index === branches.length - 1;
+      const otherwise = last
+        ? 'If the record does not match, the rule stops.'
+        : 'If the record does not match, the next condition is checked.';
+      return `
+      <article class="crit-card">
+        <div class="crit-head">
+          <span class="crit-num">${index + 1}</span>
+          <div>
+            <strong>${escapeHtml(branch.title)}</strong>
+            <p>Matches when ${escapeHtml(branch.criteria)}</p>
+          </div>
+        </div>
+        <p class="crit-when">When this matches, the actions below run and the rule is done. ${escapeHtml(otherwise)}</p>
+        <ul class="crit-actions">
+          ${branch.actions.length ? branch.actions.map(a => `
+            <li>
+              <span class="crit-kind ${escapeHtml(a.kind)}">${escapeHtml(a.kind === 'fn' ? 'Function' : a.kind === 'field' ? 'Field' : a.kind === 'email' ? 'Email' : 'Action')}</span>
+              <div><strong>${escapeHtml(a.title)}</strong><span>${escapeHtml(a.meta || 'Runs when this criteria matches')}</span></div>
+            </li>`).join('') : '<li class="muted">No actions for this criteria</li>'}
+        </ul>
+      </article>`;
+    }).join('');
+  }
+
+  function renderStaticRuleDoc(wf) {
+    const branches = ruleBranches(wf);
+    const actionCount = branches.reduce((sum, b) => sum + b.actions.length, 0);
+    const fnList = wf.function_code || [];
+    const functions = fnList.map((fn) => {
+      const title = fn.name || fn.api_name || 'Function';
+      const when = fn.timing === 'scheduled' ? 'Scheduled action' : 'Instant action';
+      const code = fn.source ? 'Code loaded' : 'Code not loaded';
+      return `<li><span class="rd-fn-icon">ƒ</span><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(when)} · ${escapeHtml(code)}</span></div></li>`;
+    }).join('');
+    const active = wf.status === 'active';
+    return `
+      <article class="static-doc">
+        <div class="rd-summary">
+          <div class="rd-stat"><span>Module</span><strong>${escapeHtml(moduleLabel(wf.module))}</strong></div>
+          <div class="rd-stat"><span>Trigger</span><strong>${escapeHtml(triggerLabel(wf.trigger_type))}</strong></div>
+          <div class="rd-stat"><span>Status</span><strong class="${active ? 'rd-on' : 'rd-off'}">${active ? 'Active' : 'Inactive'}</strong></div>
+          <div class="rd-stat"><span>Conditions</span><strong>${branches.length}</strong></div>
+          <div class="rd-stat"><span>Actions</span><strong>${actionCount}</strong></div>
+          <div class="rd-stat"><span>Functions</span><strong>${fnList.length}</strong></div>
+        </div>
+        ${wf.description ? `<p class="static-desc">${escapeHtml(wf.description)}</p>` : ''}
+        <div class="rd-grid">
+          <section class="rd-panel">
+            <div class="rd-panel-head"><h4>Flow</h4><span>Checked from top to bottom</span></div>
+            ${renderFlowchart(wf)}
+          </section>
+          <section class="rd-panel">
+            <div class="rd-panel-head"><h4>Criteria and actions</h4><span>${plural(branches.length, 'condition')}</span></div>
+            <div class="crit-list">${renderCriteriaDetails(wf)}</div>
+            ${functions ? `<div class="rd-panel-head rd-sub"><h4>Functions on this rule</h4></div><ul class="fn-mini">${functions}</ul>` : ''}
+          </section>
+        </div>
+      </article>`;
+  }
+
+  function closeRuleDoc() {
+    dom.ruleDocBackdrop.hidden = true;
+  }
+
+  function showWorkflowRule(id) {
+    const wf = state.reviewWorkflows.find(w => String(w.id) === String(id))
+      || state.allWorkflowsList.find(w => String(w.id) === String(id));
+    if (!wf) return;
+    dom.ruleDocTitle.textContent = wf.name || 'Workflow rule';
+    dom.ruleDocBody.innerHTML = renderStaticRuleDoc(wf);
+    dom.ruleDocBackdrop.hidden = false;
+  }
+
+  function openRuleView(mode) {
+    if (mode === 'document') {
+      if (state.generated && state.generated.markdown) {
+        dom.docView.innerHTML = renderMarkdown(state.generated.markdown);
+        dom.docStatus.textContent = `Written by ${state.generated.generatedBy || aiName()}. Check the preview, then save it.`;
+        dom.docNotice.hidden = true;
+        setDocButtons(true);
+        if (state.maxStep < 4) limitSteps(4);
+        goToStep(4);
+        return;
+      }
+      generateDocument();
+      return;
+    }
+    const wf = state.reviewWorkflows.find(w => String(w.id) === String(state.activeReviewId)) || state.reviewWorkflows[0];
+    if (wf) showWorkflowRule(wf.id);
+  }
+
+  function renderActionItem(action, delay) {
+    const type = action.type || action.action_type || '';
+    const isFn = /function/i.test(type);
+    return `<li><span class="action-type ${isFn ? 'fn' : ''}">${escapeHtml(actionTypeLabel(type))}</span>${escapeHtml(action.name || action.action_name || '')}${delay ? ` <span class="muted small">${escapeHtml(delay)}</span>` : ''}</li>`;
+  }
+
+  function scheduleLabel(group) {
+    const after = group.execute_after || group.execute_at || {};
+    if (after.unit && after.period) return `after ${after.unit} ${after.period}`;
+    if (group.name) return group.name;
+    return 'scheduled';
+  }
+
+  function renderConditions(wf) {
+    const conditions = Array.isArray(wf.conditions) ? wf.conditions : [];
+    if (!conditions.length) {
+      return `
+        <div class="condition">
+          <div class="condition-title">Criteria</div>
+          <div class="criteria-box">${escapeHtml(readableCriteria(wf.criteria) || 'No criteria. Runs for every record that matches the trigger.')}</div>
+          <ul class="action-list">${(wf.actions || []).map(a => `<li>${escapeHtml(a)}</li>`).join('') || '<li class="muted">No actions returned</li>'}</ul>
+        </div>`;
+    }
+    return conditions.map((c, i) => {
+      const criteria = formatCriteria(c.criteria_details && c.criteria_details.criteria) || 'No criteria. Runs for every record that matches the trigger.';
+      const instant = (c.instant_actions && c.instant_actions.actions) || [];
+      const scheduled = Array.isArray(c.scheduled_actions) ? c.scheduled_actions : [];
+      const items = instant.map(a => renderActionItem(a))
+        .concat(scheduled.flatMap(g => (g.actions || []).map(a => renderActionItem(a, scheduleLabel(g)))));
+      return `
+        <div class="condition">
+          <div class="condition-title">Condition ${c.sequence_number || i + 1}</div>
+          <div class="criteria-box">${escapeHtml(readableCriteria(criteria))}</div>
+          <ul class="action-list">${items.join('') || '<li class="muted">No actions on this condition</li>'}</ul>
+        </div>`;
+    }).join('');
+  }
+
+  function renderCode(source) {
+    return `<pre class="code">${String(source).split('\n').map(line => `<span class="ln">${escapeHtml(line) || ' '}</span>`).join('')}</pre>`;
+  }
+
+  // ==========================================
+  // STEP 3: FUNCTION REVIEW (mask secrets, check, improve, apply)
+  // ==========================================
+  const DR = window.DelugeReview;
+  const LOCAL_BACKUP_PREFIX = 'livingdocs.fnBackups.';
+  const LOCAL_BACKUP_LIMIT = 10;
+  const SEVERITY_LABEL = { error: 'Error', warning: 'Warning', info: 'Info' };
+  let promptRebuildTimer = null;
+  let tipLine = null;
+
+  function plural(n, word) {
+    return `${n} ${word}${n === 1 ? '' : 's'}`;
+  }
+
+  function fnKey(fn) {
+    return String(fn.id || fn.api_name || fn.name || '');
+  }
+
+  function isDeluge(fn) {
+    return !/(java|node|python)/i.test(`${fn.language || ''} ${fn.runtime || ''}`);
+  }
+
+  function fnReview(fn) {
+    const key = fnKey(fn);
+    if (!state.fnReviews[key]) {
+      state.fnReviews[key] = { key, manual: [], ignore: [], tab: 'checks', result: null, improved: null, improving: false, applying: false, backups: null, changesOnly: false };
+    }
+    return state.fnReviews[key];
+  }
+
+  function runFnReview(fn) {
+    const r = fnReview(fn);
+    r.result = fn.source ? DR.review(fn.source, { manual: r.manual, ignore: r.ignore, lint: isDeluge(fn) }) : null;
+    return r;
+  }
+
+  function uniqueFunctions(workflows) {
+    const seen = new Map();
+    (workflows || []).forEach(wf => (wf.function_code || []).forEach((fn) => {
+      if (fn.source && !seen.has(fnKey(fn))) seen.set(fnKey(fn), fn);
+    }));
+    return [...seen.values()];
+  }
+
+  function reviewFunctions(workflows) {
+    uniqueFunctions(workflows).forEach(fn => runFnReview(fn));
+  }
+
+  function findReviewFunction(key) {
+    for (const wf of state.reviewWorkflows) {
+      const fn = (wf.function_code || []).find(f => fnKey(f) === key);
+      if (fn) return fn;
+    }
+    return null;
+  }
+
+  function allMaskEntries() {
+    return Object.values(state.fnReviews).flatMap(r => (r.result ? r.result.mask.entries : []));
+  }
+
+  // The only copy of the workflows that is ever sent to the model.
+  // Rule, criteria and code sent for documentation carry no record, workflow, function or org IDs.
+  function scrubIdsForAI(value) {
+    if (value == null) return value;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text.replace(/(?<![\w{])\d{9,}(?![\w}])/g, '{{ID}}');
+  }
+
+  function maskedWorkflowsForAI() {
+    return state.reviewWorkflows.map(({ id, raw, ...wf }) => ({
+      ...wf,
+      criteria: scrubIdsForAI(wf.criteria),
+      description: scrubIdsForAI(wf.description || ''),
+      actions: (wf.actions || []).map(scrubIdsForAI),
+      function_code: (wf.function_code || []).map((fn) => {
+        const { id: fnId, ...rest } = fn;
+        if (!fn.source) return { ...rest, error: scrubIdsForAI(fn.error || ''), note: scrubIdsForAI(fn.note || '') };
+        const r = fnReview(fn);
+        if (!r.result) runFnReview(fn);
+        return { ...rest, description: scrubIdsForAI(fn.description || ''), source: r.result.mask.masked };
+      })
+    }));
+  }
+
+  function maskedValueCount() {
+    return uniqueFunctions(state.reviewWorkflows).reduce((sum, fn) => sum + ((fnReview(fn).result?.mask.entries.length) || 0), 0);
+  }
+
+  function schedulePromptRebuild() {
+    clearTimeout(promptRebuildTimer);
+    promptRebuildTimer = setTimeout(() => buildPrompt(), 400);
+  }
+
+  function rerenderFnCard(fn) {
+    const el = dom.reviewBody.querySelector(`.fn-card[data-fn="${CSS.escape(fnKey(fn))}"]`);
+    if (el) el.outerHTML = renderFunctionCard(fn);
+  }
+
+  function renderFunctions(wf) {
+    const fns = wf.function_code || [];
+    if (!fns.length) {
+      return '<div class="fn-missing muted small">This rule does not call a custom function.</div>';
+    }
+    return fns.map(fn => renderFunctionCard(fn)).join('');
+  }
+
+  function renderFunctionCard(fn) {
+    const title = fn.name || fn.api_name || 'Function';
+    const meta = [fn.api_name && fn.api_name !== title ? fn.api_name : '', fn.language || fn.runtime, fn.timing === 'scheduled' ? 'Scheduled action' : 'Instant action', fn.id ? `ID ${fn.id}` : '']
+      .filter(Boolean).join(' · ');
+    const args = (fn.arguments || []).map(a => (a && typeof a === 'object') ? `${a.name}${a.type ? ` (${a.type})` : ''}` : String(a)).join(', ');
+    const head = (badges) => `
+      <div class="fn-head">
+        <div>
+          <div class="fn-name">${escapeHtml(title)}</div>
+          <div class="fn-meta">${escapeHtml(meta)}${args ? ` · Arguments: ${escapeHtml(args)}` : ''}</div>
+        </div>
+        <div class="fn-badges">${badges}</div>
+      </div>`;
+
+    if (!fn.source) {
+      const attempts = (fn.attempts || []).length
+        ? `<ul class="attempts">${fn.attempts.map(a => `<li><code>GET ${escapeHtml(a.endpoint)}</code> ${escapeHtml(a.result)}</li>`).join('')}</ul>`
+        : '';
+      return `
+        <div class="fn-card" data-fn="${escapeHtml(fnKey(fn))}">
+          ${head('<span class="pill pill-red">Code not available</span>')}
+          <div class="fn-missing"><div class="notice error">${escapeHtml(fn.error || fn.note || 'Zoho returned no source for this function.')}</div>${attempts}</div>
+        </div>`;
+    }
+
+    const r = fnReview(fn);
+    if (!r.result) runFnReview(fn);
+    const { counts, mask } = r.result;
+    const deluge = isDeluge(fn);
+    const badges = [
+      deluge && counts.error ? `<span class="pill pill-red">${plural(counts.error, 'error')}</span>` : '',
+      deluge && counts.warning ? `<span class="pill pill-amber">${plural(counts.warning, 'warning')}</span>` : '',
+      deluge && counts.info ? `<span class="pill pill-gray">${counts.info} info</span>` : '',
+      deluge && !counts.error && !counts.warning && !counts.info ? '<span class="pill pill-green">No issues</span>' : '',
+      `<span class="pill pill-blue">${mask.entries.length ? `${plural(mask.entries.length, 'value')} masked` : 'No secrets found'}</span>`,
+      r.externalChange ? `<span class="pill pill-amber" title="The code differs from documented version ${escapeHtml(r.externalChange.version)}">Changed since v${escapeHtml(r.externalChange.version)}</span>`
+        : r.docInfo ? `<span class="pill pill-gray" title="Documented ${escapeHtml(formatDate(r.docInfo.at))}">Documented v${escapeHtml(r.docInfo.version)}</span>` : ''
+    ].join('');
+    const issueTotal = counts.error + counts.warning + counts.info;
+    const tabs = [
+      ['checks', 'Checks', deluge ? issueTotal : null],
+      ['preview', 'Sent to AI', mask.entries.length || null],
+      ['improve', 'Improve and apply', null],
+      ['history', 'Versions', r.backups ? r.backups.length : null]
+    ].map(([id, label, count]) => `
+      <button class="fn-tab ${r.tab === id ? 'active' : ''}" data-fn-tab="${id}" role="tab" aria-selected="${r.tab === id}">
+        ${label}${count ? `<span class="fn-tab-count">${count}</span>` : ''}
+      </button>`).join('');
+
+    let body = '';
+    if (r.tab === 'preview') body = renderPreviewTab(fn, r);
+    else if (r.tab === 'improve') body = renderImproveTab(fn, r);
+    else if (r.tab === 'history') body = renderHistoryTab(fn, r);
+    else body = renderChecksTab(fn, r);
+
+    return `
+      <div class="fn-card" data-fn="${escapeHtml(fnKey(fn))}">
+        ${head(badges)}
+        <div class="fn-tabs" role="tablist">${tabs}</div>
+        <div class="fn-tab-body">${body}</div>
+      </div>`;
+  }
+
+  function renderAnnotatedCode(source, issues, spans) {
+    const byLine = new Map();
+    issues.forEach((i) => { const list = byLine.get(i.line) || []; list.push(i); byLine.set(i.line, list); });
+    const secretsByLine = new Map();
+    (spans || []).forEach((s) => { const list = secretsByLine.get(s.line) || []; list.push(s); secretsByLine.set(s.line, list); });
+    const sevRank = { info: 1, warning: 2, error: 3 };
+    const sevName = ['', 'info', 'warning', 'error'];
+    const html = source.split('\n').map((text, k) => {
+      const n = k + 1;
+      const list = byLine.get(n) || [];
+      const marks = new Uint8Array(text.length);
+      (secretsByLine.get(n) || []).forEach((s) => {
+        for (let c = s.col; c < Math.min(text.length, s.col + (s.end - s.start)); c++) marks[c] |= 1;
+      });
+      let top = 0;
+      list.forEach((i) => {
+        const sev = sevRank[i.severity];
+        top = Math.max(top, sev);
+        for (let c = i.start; c < Math.min(text.length, i.end); c++) {
+          if (sev > (marks[c] >> 1)) marks[c] = (marks[c] & 1) | (sev << 1);
+        }
+      });
+      let out = '';
+      let c = 0;
+      while (c < text.length) {
+        let e = c;
+        while (e < text.length && marks[e] === marks[c]) e++;
+        const m = marks[c];
+        const cls = [m & 1 ? 'secret' : '', m >> 1 ? `u-${sevName[m >> 1]}` : ''].filter(Boolean).join(' ');
+        const seg = escapeHtml(text.slice(c, e));
+        out += cls ? `<span class="${cls}">${seg}</span>` : seg;
+        c = e;
+      }
+      return `<span class="ln${top ? ` has-issue sev-${sevName[top]}` : ''}" data-line="${n}">${out || ' '}</span>`;
+    }).join('');
+    return `<pre class="code annotated">${html}</pre>`;
+  }
+
+  function renderMaskedCode(masked) {
+    return `<pre class="code">${masked.split('\n').map(line => `<span class="ln">${escapeHtml(line).replace(/\{\{[A-Z0-9_]+\}\}/g, '<span class="ph">$&</span>') || ' '}</span>`).join('')}</pre>`;
+  }
+
+  function renderChecksTab(fn, r) {
+    const { issues, mask } = r.result;
+    const deluge = isDeluge(fn);
+    const sorted = issues.slice().sort((a, b) => (DR.SEVERITY_ORDER[a.severity] - DR.SEVERITY_ORDER[b.severity]) || (a.line - b.line));
+    const list = !deluge
+      ? '<div class="issue-none"><strong>Checks cover Deluge only</strong><span>Secrets in this function are still masked before anything is sent.</span></div>'
+      : sorted.length
+        ? sorted.map(i => `
+          <button class="issue-item sev-${i.severity}" data-line="${i.line}">
+            <span class="sev-dot"></span>
+            <span class="issue-text">
+              <span class="issue-title">Line ${i.line} · ${escapeHtml(i.title)}</span>
+              <span class="issue-msg">${escapeHtml(i.message)}</span>
+            </span>
+          </button>`).join('')
+        : `<div class="issue-none ok"><span class="issue-none-icon">${ICON.check}</span><strong>No issues found</strong><span>The function follows the Deluge checks.</span></div>`;
+    const ext = r.externalChange;
+    const extNotice = ext ? `
+      <div class="notice warning">
+        This function was changed after documentation version ${escapeHtml(ext.version)}${ext.by ? ` by ${escapeHtml(ext.by)}` : ''}${ext.at ? ` on ${escapeHtml(formatDate(ext.at))}` : ''}.
+        Generate and save the document to publish a new version.
+      </div>` : '';
+    return `${extNotice}
+      <div class="checks-grid">
+        <div class="checks-code">
+          ${renderAnnotatedCode(fn.source, deluge ? issues : [], mask.spans)}
+          <div class="code-legend">
+            <span><i class="lg lg-error"></i>Error</span><span><i class="lg lg-warning"></i>Warning</span><span><i class="lg lg-info"></i>Info</span>
+            <span><i class="lg lg-secret"></i>Masked before sending</span>
+            <span class="muted">Hover a line for details. Select text to mask it.</span>
+          </div>
+          ${fn.source_truncated ? '<div class="notice warning">The code was longer than the download limit and is cut off here.</div>' : ''}
+        </div>
+        <aside class="issue-list">${list}</aside>
+      </div>`;
+  }
+
+  function renderPreviewTab(fn, r) {
+    const { mask } = r.result;
+    const rows = mask.entries.map(e => `
+      <li class="mask-item">
+        <div class="mask-item-top">
+          <span class="ph">${escapeHtml(e.placeholder)}</span>
+          ${e.kind === 'manual'
+            ? `<button class="link-btn" data-act="remove-manual" data-ph="${escapeHtml(e.placeholder)}">Remove</button>`
+            : e.optional
+              ? `<button class="link-btn" data-act="ignore" data-ph="${escapeHtml(e.placeholder)}">Send as is</button>`
+              : '<span class="muted small">Always masked</span>'}
+        </div>
+        <div class="mask-item-meta">${escapeHtml(e.label)} · line ${e.lines.join(', ')} · <code>${escapeHtml(DR.maskPreview(e.value))}</code></div>
+      </li>`).join('');
+    const ignored = r.ignore.filter(v => fn.source.includes(v));
+    return `
+      <div class="notice info">This masked copy is the only version of the code that leaves your browser, for the improvement and in the documentation prompt. The real values are put back here after the AI answers.</div>
+      <div class="preview-grid">
+        <div>${renderMaskedCode(mask.masked)}</div>
+        <aside class="mask-panel">
+          <h4>Masked values</h4>
+          ${rows ? `<ul class="mask-list">${rows}</ul>` : '<p class="muted small">No tokens, keys, org IDs or record IDs were found.</p>'}
+          ${ignored.length ? `<div class="mask-ignored"><div class="muted small">Sent without masking</div>${ignored.map((v, i) => `
+            <div class="mask-ignored-row"><code>${escapeHtml(DR.maskPreview(v))}</code><button class="link-btn" data-act="unignore" data-idx="${r.ignore.indexOf(v)}">Mask again</button></div>`).join('')}</div>` : ''}
+          <div class="mask-add">
+            <label class="field">
+              <span>Mask another value</span>
+              <input type="text" class="mask-input" placeholder="Paste a value from the code" autocomplete="off" spellcheck="false" />
+            </label>
+            <button class="btn btn-secondary btn-sm" data-act="add-manual">Mask value</button>
+          </div>
+          <p class="muted small">You can also select text in the code and choose Mask as secret.</p>
+        </aside>
+      </div>`;
+  }
+
+  function renderImproveTab(fn, r) {
+    if (r.applying) return loadingBlock('Saving a backup and updating the function in Zoho CRM…');
+    if (r.improving) return loadingBlock(state.hasApiKey ? `Sending the masked code to ${aiName()}. This usually takes 20 to 60 seconds.` : 'Adding review notes…');
+    const lastApply = r.lastApply ? `
+      <div class="notice ${r.lastApply.verified === false ? 'warning' : 'info'} apply-done">
+        <div>
+          <strong>${escapeHtml(r.lastApply.message)}</strong> ${formatDate(r.lastApply.at)}.
+          Backup saved ${escapeHtml(r.lastApply.where.join(' and '))}.
+          ${r.lastApply.verified === false ? 'Zoho returned code that differs from what was sent. Open the function in CRM to check it.' : ''}
+        </div>
+        <button class="btn btn-secondary btn-sm" data-act="restore" data-id="${escapeHtml(r.lastApply.backupId)}">Roll back</button>
+      </div>` : '';
+
+    if (!r.improved) {
+      const { counts } = r.result;
+      return `${lastApply}
+        ${r.improveError ? `<div class="notice error">${escapeHtml(r.improveError)}</div>` : ''}
+        <div class="improve-empty">
+          <h4>Get an improved version</h4>
+          <p class="muted">The masked code and the ${plural(counts.error + counts.warning + counts.info, 'issue')} from Checks are sent to ${state.hasApiKey ? escapeHtml(aiName()) : 'the AI provider'}. The answer is unmasked in your browser and shown next to the current code, so you can compare before applying anything.</p>
+          ${state.hasApiKey ? '' : '<p class="muted small">No AI provider is configured, so you will get the current code with a header and review notes as comments. Choose a provider in Settings for rewritten code.</p>'}
+          <button class="btn btn-primary" data-act="improve">${state.hasApiKey ? 'Improve function' : 'Add review notes'}</button>
+        </div>`;
+    }
+
+    const imp = r.improved;
+    const blockers = applyBlockers(fn, r);
+    const notices = [
+      r.improveError ? `<div class="notice error">${escapeHtml(r.improveError)}</div>` : '',
+      imp.unknown.length ? `<div class="notice error">The answer contains placeholders that were never masked: ${escapeHtml(imp.unknown.join(', '))}. Apply is blocked.</div>` : '',
+      !imp.signatureOk ? '<div class="notice error">The declaration line changed. Zoho only accepts the original function name and category, so Apply is blocked.</div>' : '',
+      imp.missing.length ? `<div class="notice info">The new code no longer uses ${escapeHtml(imp.missing.join(', '))}. Check that the value is not needed, for example because a connection replaced it.</div>` : ''
+    ].join('');
+    const before = r.result.counts;
+    const after = imp.countsAfter;
+    const countLine = after ? `Issues ${before.error + before.warning + before.info} before, ${after.error + after.warning + after.info} after` : '';
+    return `${lastApply}
+      <div class="improve-head">
+        <div>
+          <h4>${imp.mode === 'model' ? 'Suggested changes' : 'Review notes added'}</h4>
+          <ul class="improve-summary">${(imp.summary || []).map(s => `<li>${escapeHtml(s)}</li>`).join('') || '<li class="muted">No summary returned.</li>'}</ul>
+        </div>
+        <div class="improve-stats">
+          <span class="row gap-8"><span class="pill pill-green">+${imp.diff.added}</span><span class="pill pill-red">−${imp.diff.removed}</span></span>
+          ${countLine ? `<span class="muted small">${countLine}</span>` : ''}
+          ${imp.model ? `<span class="muted small">${escapeHtml(imp.model)}</span>` : ''}
+        </div>
+      </div>
+      ${notices}
+      <div class="diff-toolbar">
+        <label class="check-inline"><input type="checkbox" data-act="changes-only" ${r.changesOnly ? 'checked' : ''} /> Changed lines only</label>
+      </div>
+      ${renderDiff(imp.diff, r.changesOnly)}
+      <div class="improve-actions">
+        <button class="btn btn-ghost btn-sm" data-act="discard">Discard</button>
+        <div class="row gap-8">
+          <button class="btn btn-ghost btn-sm" data-act="improve">Try again</button>
+          <button class="btn btn-secondary btn-sm" data-act="copy-improved">Copy improved code</button>
+          <button class="btn btn-primary btn-sm" data-act="apply" ${blockers.length ? `disabled title="${escapeHtml(blockers[0])}"` : ''}>Apply as main function</button>
+        </div>
+      </div>
+      ${blockers.length ? `<p class="muted small apply-hint">${escapeHtml(blockers[0])}</p>` : ''}`;
+  }
+
+  function renderDiff(diff, changesOnly) {
+    const rows = diff.rows;
+    const keep = rows.map((row, i) => !changesOnly || row.type !== 'equal' || rows.slice(Math.max(0, i - 2), i + 3).some(x => x.type !== 'equal'));
+    let html = '';
+    let gap = 0;
+    const gapRow = n => `<tr class="d-gap"><td colspan="4">${plural(n, 'unchanged line')}</td></tr>`;
+    rows.forEach((row, i) => {
+      if (!keep[i]) { gap++; return; }
+      if (gap) { html += gapRow(gap); gap = 0; }
+      let left = row.left ? escapeHtml(row.left.text) : '';
+      let right = row.right ? escapeHtml(row.right.text) : '';
+      if (row.type === 'change') {
+        const d = DR.inlineDiff(row.left.text, row.right.text);
+        left = `${escapeHtml(d.prefix)}${d.left ? `<mark>${escapeHtml(d.left)}</mark>` : ''}${escapeHtml(d.suffix)}`;
+        right = `${escapeHtml(d.prefix)}${d.right ? `<mark>${escapeHtml(d.right)}</mark>` : ''}${escapeHtml(d.suffix)}`;
+      }
+      const changed = row.type !== 'equal';
+      html += `<tr class="d-${row.type}">
+        <td class="no">${row.left ? row.left.no : ''}</td><td class="src ${changed && row.left ? 'del' : ''} ${!row.left ? 'empty' : ''}">${left}</td>
+        <td class="no">${row.right ? row.right.no : ''}</td><td class="src ${changed && row.right ? 'add' : ''} ${!row.right ? 'empty' : ''}">${right}</td>
+      </tr>`;
+    });
+    if (gap) html += gapRow(gap);
+    return `
+      <div class="diff-wrap">
+        <table class="diff">
+          <colgroup><col class="c-no" /><col /><col class="c-no" /><col /></colgroup>
+          <thead><tr><th colspan="2">Current in CRM</th><th colspan="2">Improved</th></tr></thead>
+          <tbody>${html}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function renderHistoryTab(fn, r) {
+    if (r.backupsLoading) return loadingBlock('Loading saved versions…');
+    const list = r.backups || [];
+    const rows = list.map((b) => {
+      const open = r.compareId === b.id;
+      return `
+        <div class="version-row ${open ? 'open' : ''}">
+          <div class="version-main">
+            <div>
+              <div class="version-title">${escapeHtml(b.reason || 'Backup')}${b.changelog ? ` <span class="muted">· ${escapeHtml(b.changelog)}</span>` : ''}</div>
+              <div class="muted small">${formatDate(b.at)} · ${plural(b.lines || b.source.split('\n').length, 'line')} · saved ${escapeHtml((b.where || []).join(' and ') || 'in this browser')}</div>
+            </div>
+            <div class="row gap-8">
+              <button class="btn btn-ghost btn-sm" data-act="compare" data-id="${escapeHtml(b.id)}">${open ? 'Hide changes' : 'Compare with current'}</button>
+              <button class="btn btn-ghost btn-sm" data-act="copy-backup" data-id="${escapeHtml(b.id)}">Copy</button>
+              <button class="btn btn-secondary btn-sm" data-act="restore" data-id="${escapeHtml(b.id)}">Restore</button>
+            </div>
+          </div>
+          ${open ? renderDiff(DR.diffLines(fn.source, b.source), true).replace('Current in CRM</th><th colspan="2">Improved', 'Current in CRM</th><th colspan="2">This version') : ''}
+        </div>`;
+    }).join('');
+    return `
+      ${r.backupsError ? `<div class="notice warning">${escapeHtml(r.backupsError)}</div>` : ''}
+      ${rows ? `<div class="version-list">${rows}</div>` : '<div class="improve-empty"><h4>No saved versions yet</h4><p class="muted">The current code is backed up automatically every time you apply or restore a version.</p></div>'}
+      <p class="muted small">Zoho CRM also keeps its own revision history for Deluge functions.</p>`;
+  }
+
+  // ---------- Masking actions ----------
+  function masksChanged(fn, message) {
+    const r = runFnReview(fn);
+    r.improved = null;
+    rerenderFnCard(fn);
+    schedulePromptRebuild();
+    if (message) showToast(message);
+    return r;
+  }
+
+  function addManualSecret(fn, raw) {
+    const value = String(raw || '').trim();
+    const r = fnReview(fn);
+    if (value.length < 3) { showToast('Pick at least 3 characters to mask.', 'warning'); return; }
+    if (/\{\{[A-Z0-9_]+\}\}/.test(value)) { showToast('That text is already a placeholder.', 'warning'); return; }
+    if (!fn.source.includes(value)) { showToast('That value is not in the function code.', 'warning'); return; }
+    if (!r.manual.includes(value)) r.manual.push(value);
+    masksChanged(fn, 'Value masked. The prompt was rebuilt with the new mask.');
+  }
+
+  function maskEntry(fn, placeholder) {
+    const r = fnReview(fn);
+    return r.result && r.result.mask.entries.find(e => e.placeholder === placeholder);
+  }
+
+  // ---------- Improve ----------
+  async function improveFunction(fn) {
+    if (!(await ensureAiConfigured('improve this function'))) return;
+    const r = runFnReview(fn);
+    const { mask, issues, signature } = r.result;
+    const leftover = DR.detectSecrets(mask.masked);
+    if (leftover.length) {
+      showToast('Masking did not cover every secret or ID, so nothing was sent. Check Sent to AI.', 'error');
+      return;
+    }
+    r.improving = true;
+    r.improveError = '';
+    r.tab = 'improve';
+    rerenderFnCard(fn);
+    const baseSource = fn.source;
     try {
-      const resp = await fetch('/api/simulate-change', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenario })
+      const resp = await window.LivingDocsAI.improveFunction(currentAiConfig(), {
+        fn: { id: fn.id, name: fn.name, api_name: fn.api_name, language: fn.language || fn.runtime || 'deluge', signature: signature ? signature.text : '' },
+        source: mask.masked,
+        issues,
+        placeholders: mask.entries.map(e => e.placeholder)
       });
-      const data = await resp.json();
-
-      alert(`🧪 [Demo Simulator]: ${label}\n\nSwitching to Drift Detection Radar to inspect changes...`);
-      await checkDrift();
-      switchTab('tab-drift');
+      const restored = DR.unmask(resp.code, mask.entries);
+      const code = restored.text;
+      const { missing, unknown } = restored;
+      const summary = resp.summary;
+      const deluge = isDeluge(fn);
+      r.improved = {
+        code,
+        summary,
+        mode: 'model',
+        model: resp.model || '',
+        generatedBy: `${resp.label} (${resp.model})`,
+        missing,
+        unknown,
+        baseSource,
+        signatureOk: !deluge || DR.sameSignature(signature, DR.signatureOf(code)),
+        diff: DR.diffLines(baseSource, code),
+        countsAfter: deluge ? DR.summarize(DR.lintDeluge(code)) : null
+      };
     } catch (err) {
-      alert('Simulation error: ' + err.message);
+      r.improveError = `The improvement failed: ${err.message || err}`;
+    } finally {
+      r.improving = false;
+      rerenderFnCard(fn);
     }
   }
+
+  // ---------- Apply and rollback ----------
+  function applyBlockers(fn, r) {
+    const out = [];
+    const imp = r.improved;
+    if (!canUseZohoConnection()) out.push('Open the widget inside Zoho CRM to update functions.');
+    if (!isDeluge(fn)) out.push('Only Deluge functions can be applied from here.');
+    if (fn.source_truncated) out.push('The downloaded code was cut off, so applying would lose code.');
+    if (!fn.id && !fn.api_name) out.push('The function id is unknown.');
+    if (imp) {
+      if (!imp.diff.changed) out.push('There are no changes to apply.');
+      if (imp.unknown.length) out.push('The answer contains placeholders that were never masked.');
+      if (!imp.signatureOk) out.push('The declaration line changed, and Zoho would reject it.');
+      if (imp.baseSource !== fn.source) out.push('The function changed after this suggestion. Improve it again.');
+    }
+    return out;
+  }
+
+  function localBackupKey(fn) {
+    return `${LOCAL_BACKUP_PREFIX}${fnKey(fn)}`;
+  }
+
+  function readLocalBackups(fn) {
+    try { return JSON.parse(localStorage.getItem(localBackupKey(fn)) || '[]'); } catch (_) { return []; }
+  }
+
+  function writeLocalBackup(fn, entry) {
+    try {
+      const list = [entry, ...readLocalBackups(fn).filter(b => b.id !== entry.id)].slice(0, LOCAL_BACKUP_LIMIT);
+      localStorage.setItem(localBackupKey(fn), JSON.stringify(list));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function saveFunctionBackup(fn, source, reason, changelog) {
+    const entry = {
+      function_id: fnKey(fn), api_name: fn.api_name || '', name: fn.name || '', source, reason, changelog,
+      id: `bk_${Date.now()}`, lines: source.split('\n').length, at: new Date().toISOString()
+    };
+    if (!writeLocalBackup(fn, entry)) throw new Error('The backup could not be saved in this browser, so the function was not changed.');
+    return { ...entry, where: ['in this browser'] };
+  }
+
+  function loadBackups(fn) {
+    const r = fnReview(fn);
+    r.backupsError = '';
+    r.backups = readLocalBackups(fn)
+      .map(b => ({ ...b, where: ['in this browser'] }))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    r.backupsLoading = false;
+    rerenderFnCard(fn);
+  }
+
+  // The update API only accepts multipart/form-data. CONNECTION.invoke cannot send files, so a small
+  // standalone Deluge function does the PUT with invokeurl + files through the same connection.
+  const UPDATE_HELPER_NAME = 'livingdocs_update_function';
+
+  function updateHelperScript() {
+    const connName = String(conn()).replace(/[^A-Za-z0-9_]/g, '');
+    return `// Living Docs: updates a CRM function. Argument name: payload, type String. Return type: String.
+// In the function Overview, turn on REST API and choose OAuth 2.0. Apply fails with INVALID_DATA until that is on.
+inputText = ifnull(payload,"");
+if(inputText.trim() == "")
+{
+	missing = Map();
+	missing.put("code","MISSING_INPUT");
+	missing.put("message","payload is required");
+	return missing.toString();
+}
+input = inputText.toMap();
+functionId = ifnull(input.get("functionId"),"");
+code = ifnull(input.get("code"),"");
+if(functionId == "" || code.trim() == "")
+{
+	missing = Map();
+	missing.put("code","MISSING_INPUT");
+	missing.put("message","functionId and code are required");
+	return missing.toString();
+}
+domain = ifnull(input.get("apiDomain"),"https://www.zohoapis.com");
+if(!domain.startsWith("https://www.zohoapis."))
+{
+	domain = "https://www.zohoapis.com";
+}
+fnEntry = Map();
+fnEntry.put("_code",code);
+fnList = List();
+fnList.add(fnEntry);
+metadata = Map();
+metadata.put("functions",fnList);
+publish = Map();
+publish.put("changelog",ifnull(input.get("changelog"),"Updated by Living Docs"));
+metadata.put("publish",publish);
+metaPart = Map();
+metaPart.put("paramName","metadata");
+metaPart.put("content",metadata.toString());
+metaPart.put("stringPart","true");
+metaPart.put("contentType","application/json");
+codeFile = code.toFile("function.ds");
+codeFile.setParamName("code");
+files = List();
+files.add(metaPart);
+files.add(codeFile);
+response = invokeurl
+[
+	url :domain + "/crm/v8/settings/functions/" + functionId
+	type :PUT
+	files:files
+	connection:"${connName}"
+];
+return response.toString();`;
+  }
+
+  function parseMaybeJson(value) {
+    if (value == null) return {};
+    if (typeof value === 'object') return value;
+    const text = String(value).trim();
+    if (!text) return {};
+    try { return JSON.parse(text); } catch (_) { return { raw_text: text }; }
+  }
+
+  function helperResultFromRaw(raw) {
+    const output = raw && raw.details && Object.prototype.hasOwnProperty.call(raw.details, 'output') ? raw.details.output : null;
+    if (output != null && String(output).trim()) return { ran: true, body: parseMaybeJson(output) };
+    const body = unwrapConnectionResponse(raw);
+    if (body && body.details && Object.prototype.hasOwnProperty.call(body.details, 'output') && String(body.details.output).trim()) {
+      return { ran: true, body: parseMaybeJson(body.details.output) };
+    }
+    if (body && Array.isArray(body.functions)) return { ran: true, body };
+    const code = body && body.code;
+    if (code && String(code).toLowerCase() !== 'success') {
+      return { ran: false, reason: `${code}: ${body.message || code}` };
+    }
+    return { ran: false, reason: (raw && (raw.message || raw.code)) || 'the helper function did not run' };
+  }
+
+  async function updateViaHelper(identifier, source, changelog) {
+    if (typeof ZOHO === 'undefined' || (!ZOHO.CRM?.FUNCTIONS?.execute && !ZOHO.CRM?.CONNECTION?.invoke)) {
+      return { ran: false, reason: 'This widget is not running inside Zoho CRM.' };
+    }
+    const payloadObject = { functionId: String(identifier), code: source, changelog: changelog || 'Updated by Living Docs', apiDomain: getZohoApiDomain() };
+    const payload = JSON.stringify(payloadObject);
+    const reasons = [];
+    const startedAt = Date.now();
+
+    if (ZOHO.CRM?.CONNECTION?.invoke) {
+      const attempts = [
+        { url: `${payloadObject.apiDomain}/crm/v2/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: { payload } } },
+        { url: `${payloadObject.apiDomain}/crm/v2/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: JSON.stringify({ payload }) } },
+        { url: `${payloadObject.apiDomain}/crm/v8/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: { payload } } }
+      ];
+      for (const attempt of attempts) {
+        try {
+          const raw = await withHardTimeout(ZOHO.CRM.CONNECTION.invoke(conn(), {
+            url: attempt.url,
+            method: 'POST',
+            param_type: 2,
+            headers: { 'Content-Type': 'application/json' },
+            parameters: attempt.parameters
+          }), 90000, 'Function update');
+          const parsed = helperResultFromRaw(raw);
+          debugLog(parsed.ran ? 'ok' : 'warn', conn(), 'POST', attempt.url, { request: { functionId: identifier }, raw, ms: Date.now() - startedAt });
+          if (parsed.ran) return parsed;
+          if (parsed.reason) reasons.push(parsed.reason);
+        } catch (err) {
+          reasons.push(describeSdkError(err));
+        }
+      }
+    }
+
+    if (ZOHO.CRM?.FUNCTIONS?.execute) {
+      try {
+        const raw = await withHardTimeout(
+          ZOHO.CRM.FUNCTIONS.execute(UPDATE_HELPER_NAME, { arguments: JSON.stringify({ payload }) }),
+          90000,
+          'Function update'
+        );
+        const parsed = helperResultFromRaw(raw);
+        debugLog(parsed.ran ? 'ok' : 'warn', UPDATE_HELPER_NAME, 'EXECUTE', UPDATE_HELPER_NAME, { request: { functionId: identifier }, raw, ms: Date.now() - startedAt });
+        if (parsed.ran) return parsed;
+        if (parsed.reason) reasons.push(parsed.reason);
+      } catch (err) {
+        const reason = describeSdkError(err);
+        reasons.push(reason);
+        debugLog('warn', UPDATE_HELPER_NAME, 'EXECUTE', UPDATE_HELPER_NAME, { request: { functionId: identifier }, error: err, ms: Date.now() - startedAt });
+      }
+    }
+
+    const reason = reasons.find(item => item && !/EXPECTED_PARAM_MISSING|INVALID_REQUEST/i.test(item)) || reasons[0] || 'the helper function did not run';
+    return { ran: false, reason };
+  }
+
+  async function updateViaConnection(url, source, changelog, safeName) {
+    const metadata = { functions: [{ _code: source }] };
+    if (changelog) metadata.publish = { changelog };
+    const request = {
+      url,
+      method: 'PUT',
+      param_type: 2,
+      CONTENT_TYPE: 'multipart',
+      PARTS: [{ headers: { 'Content-Disposition': 'form-data; name="metadata"', 'Content-Type': 'application/json' }, content: metadata }],
+      FILE: { fileParam: 'code', file: new File([source], `${safeName}.ds`, { type: 'text/plain' }) }
+    };
+    const startedAt = Date.now();
+    let raw;
+    try {
+      raw = await withHardTimeout(ZOHO.CRM.CONNECTION.invoke(conn(), request), 60000, 'Function update');
+    } catch (err) {
+      debugLog('error', conn(), 'PUT', url, { request, error: err, ms: Date.now() - startedAt });
+      throw new Error(`The update request failed: ${describeSdkError(err)}`);
+    }
+    const body = unwrapConnectionResponse(raw);
+    debugLog('ok', conn(), 'PUT', url, { request, raw, body, ms: Date.now() - startedAt });
+    return body;
+  }
+
+  function updateHelperRequiredError(reason) {
+    const detail = reason ? ` Zoho said: ${reason}.` : '';
+    const err = new Error(`Apply could not run "${UPDATE_HELPER_NAME}".${detail} Open that function, turn on REST API with OAuth 2.0, and paste the latest script from the setup steps. Then apply again.`);
+    err.code = 'UPDATE_HELPER_REQUIRED';
+    return err;
+  }
+
+  async function updateFunctionInCrm(fn, source, changelog) {
+    const identifier = fn.id || fn.api_name;
+    const helper = await updateViaHelper(identifier, source, changelog);
+    if (!helper.ran) throw updateHelperRequiredError(helper.reason);
+    const body = helper.body;
+    if (body && body.raw_text && /INVALID_DATA|EXPECTED_PARAM_MISSING|MISSING_INPUT/.test(body.raw_text)) {
+      throw updateHelperRequiredError(body.raw_text.slice(0, 400));
+    }
+    const row = Array.isArray(body.functions) ? body.functions[0] : null;
+    if (row && String(row.status).toLowerCase() === 'success') return body;
+    const err = row || body || {};
+    const code = err.code || 'UPDATE_FAILED';
+    if (code === 'EXPECTED_PARAM_MISSING' || code === 'INVALID_DATA' || code === 'MISSING_INPUT') {
+      throw updateHelperRequiredError(`${code}: ${err.message || 'the helper did not send the new code as metadata _code'}`);
+    }
+    let message = err.message || 'Zoho did not confirm the update.';
+    if (code === 'COMPILATION_ERROR') {
+      const details = [].concat(err.details || []).map(d => [d.line_number || d.line ? `line ${d.line_number || d.line}` : '', d.message || ''].filter(Boolean).join(': ')).filter(Boolean);
+      message = `Zoho could not compile the new code${details.length ? ` (${details.join('; ')})` : ''}. Nothing was changed.`;
+    } else if (/SCOPE/i.test(code)) {
+      message = `The connection "${conn()}" needs the ZohoCRM.settings.functions.UPDATE scope (or ZohoCRM.settings.functions.ALL).`;
+    } else if (code === 'NO_PERMISSION') {
+      message = 'Your CRM profile needs the Manage Automation permission.';
+    }
+    throw new Error(`${code}: ${message}`);
+  }
+
+  function setFunctionSource(fn, source) {
+    const key = fnKey(fn);
+    state.reviewWorkflows.forEach(wf => (wf.function_code || []).forEach((f) => {
+      if (fnKey(f) === key) {
+        f.source = source;
+        f.source_truncated = false;
+      }
+    }));
+    runFnReview(fn);
+  }
+
+  async function applySource(fn, newSource, { reason, changelog, doneMessage, changeType, changeReason, summary = [], aiLabel = '' }) {
+    const r = fnReview(fn);
+    r.applying = true;
+    r.improveError = '';
+    r.tab = 'improve';
+    rerenderFnCard(fn);
+    try {
+      const oldSource = fn.source;
+      const backup = await saveFunctionBackup(fn, oldSource, reason, changeReason || changelog);
+      await updateFunctionInCrm(fn, newSource, changelog);
+      let verified = null;
+      try {
+        const check = await downloadFunctionSource(conn(), { id: fn.id, api_name: fn.api_name });
+        if (check.source) verified = check.source.replace(/\s+/g, '') === newSource.replace(/\s+/g, '');
+      } catch (_) {}
+      setFunctionSource(fn, newSource);
+      r.improved = null;
+      r.backups = null;
+      r.externalChange = null;
+      r.lastApply = { message: doneMessage, at: new Date().toISOString(), where: backup.where, backupId: backup.id, backup, verified };
+      showToast(`${doneMessage}. The previous version is saved.`);
+      schedulePromptRebuild();
+    } catch (err) {
+      r.improveError = err.message || String(err);
+      if (err.code === 'UPDATE_HELPER_REQUIRED') {
+        r.applying = false;
+        rerenderFnCard(fn);
+        if (await showUpdateHelperDialog()) return applySource(fn, newSource, { reason, changelog, doneMessage, changeType, changeReason, summary, aiLabel });
+        return;
+      }
+      showToast('The function was not changed. See the details in the panel.', 'error');
+    } finally {
+      r.applying = false;
+      rerenderFnCard(fn);
+    }
+  }
+
+  function showUpdateHelperDialog() {
+    const script = updateHelperScript();
+    const pending = confirmDialog({
+      title: 'One-time setup: function update helper',
+      confirmLabel: 'I created it, apply again',
+      html: `
+        <p>Apply sends the new code through the standalone function <code>${UPDATE_HELPER_NAME}</code>. Zoho returns INVALID_DATA when that function is missing, the argument is not named <code>payload</code>, or REST API OAuth is turned off.</p>
+        <ol class="helper-steps">
+          <li>In Zoho CRM open <strong>Setup &gt; Developer Hub &gt; Functions</strong>. Create <code>${UPDATE_HELPER_NAME}</code> if it is not there, or open the existing one.</li>
+          <li>Category <strong>Standalone</strong>. Display name <code>Living Docs update function</code>.</li>
+          <li>Click <strong>Edit Arguments</strong> and keep one argument named <code>payload</code> of type <strong>String</strong>. Set the return type to <strong>String</strong>.</li>
+          <li>Replace the function body with the script below, then click <strong>Save</strong>.</li>
+          <li>Open the function overview. Under <strong>REST API</strong>, enable <strong>OAuth 2.0</strong> and save. Apply cannot call the function until OAuth is on.</li>
+        </ol>
+        <p class="muted small">The script uses the connection <code>${escapeHtml(conn())}</code>, which needs ZohoCRM.settings.functions.ALL and ZohoCRM.functions.execute.CREATE. Only users who can open this widget can run it.</p>
+        <div class="helper-code-head"><span>Function body</span><button type="button" class="btn btn-ghost btn-sm" id="helperCopy">Copy code</button></div>
+        <pre class="helper-code">${escapeHtml(script)}</pre>`
+    });
+    const copyBtn = $('helperCopy');
+    if (copyBtn) copyBtn.addEventListener('click', () => copyText(script, copyBtn, 'Copy code'));
+    return pending.then(Boolean);
+  }
+
+  async function applyImproved(fn) {
+    const r = fnReview(fn);
+    const imp = r.improved;
+    if (!imp) return;
+    const blockers = applyBlockers(fn, r);
+    if (blockers.length) { showToast(blockers[0], 'warning'); return; }
+    const answer = await confirmDialog({
+      title: 'Apply as the main function?',
+      confirmLabel: 'Apply to CRM',
+      requireAck: 'I reviewed the side-by-side changes',
+      html: `
+        <p>This replaces the code of <strong>${escapeHtml(fn.name || fn.api_name)}</strong> in Zoho CRM. Every workflow rule that calls it runs the new code right away.</p>
+        <dl class="facts compact">
+          <div><dt>Function</dt><dd>${escapeHtml(fn.api_name || fn.name || '')}</dd></div>
+          <div><dt>Function ID</dt><dd>${escapeHtml(fn.id || 'unknown')}</dd></div>
+          <div><dt>Changes</dt><dd>+${imp.diff.added} / −${imp.diff.removed} lines</dd></div>
+          <div><dt>Backup</dt><dd>The current code is saved first</dd></div>
+        </dl>
+        ${reasonFieldHtml('Why is this change needed? For example: the invoice sync failed silently when the API returned an error.')}
+        <label class="field"><span>Change note in Zoho</span><input type="text" id="modalChangelog" maxlength="200" value="Improved with Living Docs function review" /></label>
+        <p class="muted small">If Zoho finds a compile error, nothing changes and the error is shown. The previous code is kept as a backup in this browser, and Zoho CRM keeps its own revision history.</p>`
+    });
+    if (!answer) return;
+    await applySource(fn, imp.code, {
+      reason: 'Before apply',
+      changelog: answer.changelog,
+      doneMessage: 'Function updated in CRM',
+      changeType: imp.mode === 'model' ? 'Improved with AI' : 'Review notes added',
+      changeReason: answer.reason,
+      summary: imp.summary || [],
+      aiLabel: imp.generatedBy || ''
+    });
+  }
+
+  function reasonFieldHtml(placeholder) {
+    return `<label class="field"><span>Reason for the change <span class="req">required</span></span><textarea id="modalReason" rows="3" maxlength="1500" data-required placeholder="${escapeHtml(placeholder)}"></textarea></label>`;
+  }
+
+  async function restoreBackup(fn, backupId) {
+    const r = fnReview(fn);
+    const backup = (r.backups || []).find(b => b.id === backupId) || (r.lastApply && r.lastApply.backupId === backupId ? r.lastApply.backup : null)
+      || readLocalBackups(fn).find(b => b.id === backupId);
+    if (!backup) { showToast('That version could not be found.', 'warning'); return; }
+    if (!canUseZohoConnection()) { showToast('Open the widget inside Zoho CRM to restore versions.', 'warning'); return; }
+    const diff = DR.diffLines(fn.source, backup.source);
+    if (!diff.changed) { showToast('This version is the same as the current code.', 'warning'); return; }
+    const when = formatDate(backup.at);
+    const answer = await confirmDialog({
+      title: 'Restore this version?',
+      confirmLabel: 'Restore in CRM',
+      html: `
+        <p>The code of <strong>${escapeHtml(fn.name || fn.api_name)}</strong> is replaced with the version saved on ${escapeHtml(when)}. The current code is backed up first.</p>
+        <dl class="facts compact">
+          <div><dt>Changes</dt><dd>+${diff.added} / −${diff.removed} lines</dd></div>
+          <div><dt>Saved</dt><dd>${escapeHtml((backup.where || []).join(' and ') || 'in this browser')}</dd></div>
+        </dl>
+        ${reasonFieldHtml('Why roll back? For example: the new version broke the Deals workflow.')}
+        <label class="field"><span>Change note in Zoho</span><input type="text" id="modalChangelog" maxlength="200" value="${escapeHtml(`Restored the version from ${when}`)}" /></label>`
+    });
+    if (!answer) return;
+    await applySource(fn, backup.source, {
+      reason: 'Before restore',
+      changelog: answer.changelog,
+      doneMessage: 'Previous version restored',
+      changeType: 'Restored earlier version',
+      changeReason: answer.reason,
+      summary: [`Restored the version saved on ${when}${backup.changelog ? ` (${backup.changelog})` : ''}.`]
+    });
+  }
+
+  // ---------- Dialog, tooltip, selection ----------
+  function confirmDialog({ title, html, confirmLabel = 'Confirm', requireAck = '' }) {
+    return new Promise((resolve) => {
+      dom.modalTitle.textContent = title;
+      dom.modalBody.innerHTML = html + (requireAck ? `<label class="check-inline modal-ack"><input type="checkbox" id="modalAck" /> ${escapeHtml(requireAck)}</label>` : '');
+      dom.modalConfirm.textContent = confirmLabel;
+      dom.modalBackdrop.hidden = false;
+      const ack = $('modalAck');
+      const required = [...dom.modalBody.querySelectorAll('[data-required]')];
+      const refresh = () => {
+        dom.modalConfirm.disabled = (ack && !ack.checked) || required.some(el => el.value.trim().length < 3);
+      };
+      refresh();
+      if (ack) ack.addEventListener('change', refresh);
+      required.forEach(el => el.addEventListener('input', refresh));
+      const onKey = (e) => { if (e.key === 'Escape') close(null); };
+      const onBackdrop = (e) => { if (e.target === dom.modalBackdrop) close(null); };
+      function close(result) {
+        dom.modalBackdrop.hidden = true;
+        dom.modalConfirm.onclick = null;
+        dom.modalCancel.onclick = null;
+        document.removeEventListener('keydown', onKey);
+        dom.modalBackdrop.removeEventListener('mousedown', onBackdrop);
+        resolve(result);
+      }
+      document.addEventListener('keydown', onKey);
+      dom.modalBackdrop.addEventListener('mousedown', onBackdrop);
+      dom.modalCancel.onclick = () => close(null);
+      dom.modalConfirm.onclick = () => {
+        if (dom.modalConfirm.disabled) return;
+        const note = $('modalChangelog');
+        const reasonEl = $('modalReason');
+        close({ changelog: note ? note.value.trim() : '', reason: reasonEl ? reasonEl.value.trim() : '' });
+      };
+      setTimeout(() => (required[0] || ack || dom.modalConfirm).focus(), 50);
+    });
+  }
+
+  function showIssueTip(lineEl, clientX) {
+    const card = lineEl.closest('.fn-card[data-fn]');
+    const r = card && state.fnReviews[card.dataset.fn];
+    if (!r || !r.result) return;
+    const line = Number(lineEl.dataset.line);
+    const list = r.result.issues.filter(i => i.line === line);
+    if (!list.length) { hideIssueTip(); return; }
+    tipLine = lineEl;
+    const tip = dom.issueTip;
+    tip.innerHTML = list.map(i => `
+      <div class="tip-item">
+        <div class="tip-head"><span class="sev-badge sev-${i.severity}">${SEVERITY_LABEL[i.severity]}</span><span>${escapeHtml(i.title)}</span></div>
+        <div class="tip-msg">${escapeHtml(i.message)}</div>
+        <div class="tip-fix"><span>Fix</span>${escapeHtml(i.fix)}</div>
+      </div>`).join('');
+    tip.hidden = false;
+    const rect = lineEl.getBoundingClientRect();
+    const x = typeof clientX === 'number' ? clientX : rect.left + 80;
+    const left = Math.min(Math.max(8, x - 24), window.innerWidth - tip.offsetWidth - 8);
+    let top = rect.bottom + 6;
+    if (top + tip.offsetHeight > window.innerHeight - 8) top = Math.max(8, rect.top - tip.offsetHeight - 6);
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  function hideIssueTip() {
+    tipLine = null;
+    dom.issueTip.hidden = true;
+  }
+
+  function scrollToIssueLine(card, line) {
+    const el = card.querySelector(`.code.annotated .ln[data-line="${line}"]`);
+    if (!el) return;
+    const box = el.closest('.code');
+    box.scrollTop = el.offsetTop - box.clientHeight / 2;
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+    setTimeout(() => showIssueTip(el), 150);
+  }
+
+  function onCodeSelection() {
+    const btn = dom.maskSelBtn;
+    const sel = window.getSelection();
+    const text = sel && sel.rangeCount ? sel.toString() : '';
+    const node = sel && sel.anchorNode ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement) : null;
+    const card = node && node.closest('.fn-card[data-fn]');
+    if (!text.trim() || text.includes('\n') || text.length > 300 || !card || !node.closest('.code')) {
+      btn.hidden = true;
+      return;
+    }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    btn.dataset.fn = card.dataset.fn;
+    btn.dataset.value = text.trim();
+    btn.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    btn.style.left = `${rect.left + window.scrollX}px`;
+    btn.hidden = false;
+  }
+
+  function bindFunctionReviewEvents() {
+    dom.reviewBody.addEventListener('click', (e) => {
+      const card = e.target.closest('.fn-card[data-fn]');
+      if (!card) return;
+      const fn = findReviewFunction(card.dataset.fn);
+      if (!fn) return;
+      const r = fnReview(fn);
+
+      const tab = e.target.closest('[data-fn-tab]');
+      if (tab) {
+        r.tab = tab.dataset.fnTab;
+        hideIssueTip();
+        rerenderFnCard(fn);
+        if (r.tab === 'history' && !r.backups && !r.backupsLoading) loadBackups(fn);
+        return;
+      }
+      const issue = e.target.closest('.issue-item[data-line]');
+      if (issue) { scrollToIssueLine(card, Number(issue.dataset.line)); return; }
+
+      const actEl = e.target.closest('[data-act]');
+      if (!actEl || actEl.type === 'checkbox') return;
+      const act = actEl.dataset.act;
+      if (act === 'improve') improveFunction(fn);
+      else if (act === 'apply') applyImproved(fn);
+      else if (act === 'discard') { r.improved = null; r.improveError = ''; rerenderFnCard(fn); }
+      else if (act === 'copy-improved' && r.improved) copyText(r.improved.code, actEl, 'Copy improved code');
+      else if (act === 'restore') restoreBackup(fn, actEl.dataset.id);
+      else if (act === 'compare') { r.compareId = r.compareId === actEl.dataset.id ? null : actEl.dataset.id; rerenderFnCard(fn); }
+      else if (act === 'copy-backup') {
+        const b = (r.backups || []).find(x => x.id === actEl.dataset.id);
+        if (b) copyText(b.source, actEl, 'Copy');
+      } else if (act === 'add-manual') addManualSecret(fn, card.querySelector('.mask-input')?.value);
+      else if (act === 'remove-manual') {
+        const entry = maskEntry(fn, actEl.dataset.ph);
+        if (entry) r.manual = r.manual.filter(v => v !== entry.value);
+        masksChanged(fn, 'Value removed from the mask. The prompt was rebuilt.');
+      } else if (act === 'ignore') {
+        const entry = maskEntry(fn, actEl.dataset.ph);
+        if (entry && !r.ignore.includes(entry.value)) r.ignore.push(entry.value);
+        masksChanged(fn, `${entry ? entry.placeholder : 'The value'} will be sent as is. The prompt was rebuilt.`);
+      } else if (act === 'unignore') {
+        r.ignore.splice(Number(actEl.dataset.idx), 1);
+        masksChanged(fn, 'Value masked again. The prompt was rebuilt.');
+      }
+    });
+
+    dom.reviewBody.addEventListener('change', (e) => {
+      if (e.target.dataset.act !== 'changes-only') return;
+      const card = e.target.closest('.fn-card[data-fn]');
+      const fn = card && findReviewFunction(card.dataset.fn);
+      if (!fn) return;
+      fnReview(fn).changesOnly = e.target.checked;
+      rerenderFnCard(fn);
+    });
+
+    dom.reviewBody.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || !e.target.classList.contains('mask-input')) return;
+      const card = e.target.closest('.fn-card[data-fn]');
+      const fn = card && findReviewFunction(card.dataset.fn);
+      if (fn) addManualSecret(fn, e.target.value);
+    });
+
+    dom.reviewBody.addEventListener('mouseover', (e) => {
+      const ln = e.target.closest('.code.annotated .ln.has-issue');
+      if (ln && ln !== tipLine) showIssueTip(ln, e.clientX);
+    });
+    dom.reviewBody.addEventListener('mouseout', (e) => {
+      if (tipLine && !(e.relatedTarget && tipLine.contains(e.relatedTarget))) hideIssueTip();
+    });
+    window.addEventListener('scroll', hideIssueTip, true);
+
+    dom.reviewBody.addEventListener('mouseup', () => setTimeout(onCodeSelection, 0));
+    document.addEventListener('mousedown', (e) => {
+      if (e.target !== dom.maskSelBtn) dom.maskSelBtn.hidden = true;
+    });
+    dom.maskSelBtn.addEventListener('mousedown', e => e.preventDefault());
+    dom.maskSelBtn.addEventListener('click', () => {
+      const fn = findReviewFunction(dom.maskSelBtn.dataset.fn);
+      dom.maskSelBtn.hidden = true;
+      if (fn) addManualSecret(fn, dom.maskSelBtn.dataset.value);
+      window.getSelection()?.removeAllRanges();
+    });
+  }
+
+  function renderReview() {
+    const list = state.reviewWorkflows;
+    const wf = list.find(w => String(w.id) === String(state.activeReviewId)) || list[0];
+    if (!wf) {
+      dom.reviewBody.innerHTML = '<div class="notice error">No workflow rule loaded.</div>';
+      return;
+    }
+    dom.reviewTabs.innerHTML = list.length > 1 ? list.map(w => `
+      <button class="review-tab ${w.id === wf.id ? 'active' : ''}" data-review-id="${escapeHtml(w.id)}">
+        ${escapeHtml(w.name)}${(w.function_code || []).length ? `<span class="pill pill-blue">${w.function_code.length}</span>` : ''}
+      </button>`).join('') : '';
+
+    const modified = [formatDate(wf.modified_time), wf.modified_by && wf.modified_by.name].filter(Boolean).join(' by ');
+    const lastDoc = state.docLog && state.docLog.byItem[String(wf.id)];
+    const lastDocHtml = lastDoc
+      ? `v${escapeHtml(lastDoc.Doc_Version || 1)} · ${escapeHtml(formatDate(lastDoc.Generated_At || lastDoc.Created_Time))}`
+      : 'Not yet';
+    dom.reviewBody.innerHTML = `
+      <div class="review-grid">
+        <div class="review-side">
+          <div class="card">
+            <div class="card-head"><h3>${escapeHtml(wf.name)}</h3></div>
+            <dl class="facts">
+              <div><dt>Module</dt><dd>${escapeHtml(moduleLabel(wf.module))}</dd></div>
+              <div><dt>Trigger</dt><dd>${escapeHtml(triggerLabel(wf.trigger_type))}</dd></div>
+              <div><dt>Status</dt><dd>${wf.status === 'active' ? '<span class="pill pill-green">Active</span>' : '<span class="pill pill-gray">Inactive</span>'}</dd></div>
+              <div><dt>Functions</dt><dd>${(wf.function_code || []).length}</dd></div>
+              ${modified ? `<div><dt>Last modified</dt><dd>${escapeHtml(modified)}</dd></div>` : ''}
+              ${state.docLog && state.docLog.ok ? `<div><dt>Last documented</dt><dd>${lastDocHtml}</dd></div>` : ''}
+            </dl>
+          </div>
+          ${wf.description ? `<div class="card"><div class="card-head"><h3>Description</h3></div><p class="condition">${escapeHtml(wf.description)}</p></div>` : ''}
+        </div>
+        <div class="review-main">
+          <div class="card">
+            <div class="card-head"><h3>Criteria and actions</h3></div>
+            ${renderConditions(wf)}
+          </div>
+        </div>
+      </div>
+      <div class="card fn-section">
+        <div class="card-head"><h3>Function code</h3><span class="muted small">Secrets are masked and the code is checked before anything is sent to the AI</span></div>
+        ${renderFunctions(wf)}
+      </div>`;
+  }
+
+  async function buildPrompt() {
+    if (!state.reviewWorkflows.length) return;
+    setBusy(dom.btnRebuildPrompt, true);
+    dom.btnGenerate.disabled = true;
+    try {
+      const resp = window.LivingDocsAI.buildWorkflowPrompt(maskedWorkflowsForAI(), promptSnapshot(), state.audience);
+      dom.promptSystem.value = resp.system || '';
+      dom.promptUser.value = resp.user || '';
+      updatePromptStats();
+      const { total, withSource } = functionSummary(state.reviewWorkflows);
+      const masked = maskedValueCount();
+      dom.reviewStatus.textContent = total
+        ? `${withSource} of ${total} function${total === 1 ? '' : 's'} loaded with code${masked ? `, ${plural(masked, 'secret value')} masked` : ''}. Check the criteria and code, then generate.`
+        : 'No custom functions on the selected rules. The document covers criteria and actions.';
+      dom.btnGenerate.disabled = false;
+    } catch (err) {
+      dom.reviewStatus.textContent = `The prompt could not be built: ${err.message || err}`;
+    } finally {
+      setBusy(dom.btnRebuildPrompt, false);
+    }
+  }
+
+  function updatePromptStats() {
+    const chars = dom.promptSystem.value.length + dom.promptUser.value.length;
+    dom.promptStats.textContent = chars
+      ? `${chars.toLocaleString()} characters, about ${Math.ceil(chars / 4).toLocaleString()} tokens`
+      : 'Built from the rule and its function code';
+  }
+
+  function promptAsText() {
+    return `SYSTEM:\n${dom.promptSystem.value.trim()}\n\nUSER:\n${dom.promptUser.value.trim()}`;
+  }
+
+  // ==========================================
+  // STEP 4: DOCUMENT
+  // ==========================================
+  function documentFileName() {
+    const list = state.reviewWorkflows;
+    const base = list.length === 1 ? list[0].name : `${list.length}_workflow_rules`;
+    const slug = String(base).replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 60) || 'Workflow';
+    return `Workflow_Documentation_${slug}_${new Date().toISOString().slice(0, 10)}.pdf`;
+  }
+
+  function setDocButtons(enabled) {
+    [dom.btnCopyMd, dom.btnDownloadMd, dom.btnDownloadPdf, dom.btnToSave].forEach((btn) => { btn.disabled = !enabled; });
+    renderSaveButton();
+  }
+
+  async function generateDocument() {
+    const user = dom.promptUser.value.trim();
+    if (!user) {
+      showToast('The prompt is empty. Use Reset prompt to rebuild it.', 'warning');
+      return;
+    }
+    if (!(await ensureAiConfigured('generate documentation'))) return;
+    const count = state.reviewWorkflows.length;
+    state.generated = null;
+    state.saved = null;
+    limitSteps(4);
+    goToStep(4);
+    setDocButtons(false);
+    dom.docNotice.hidden = true;
+    dom.docStatus.textContent = `${aiName()} is writing documentation for ${count} workflow rule${count === 1 ? '' : 's'}…`;
+    dom.docView.innerHTML = loadingBlock('This usually takes 20 to 60 seconds.');
+    const entries = allMaskEntries();
+    const system = scrubIdsForAI(DR.scrubText(dom.promptSystem.value.trim(), entries));
+    const safeUser = scrubIdsForAI(DR.scrubText(user, entries));
+    if (system !== dom.promptSystem.value.trim() || safeUser !== user) {
+      showToast('Secrets or IDs typed into the prompt were masked before sending.', 'warning');
+    }
+    try {
+      const resp = await window.LivingDocsAI.callAi(currentAiConfig(), { system, user: safeUser, maxTokens: 8000, temperature: 0.2 });
+      const markdown = window.LivingDocsAI.cleanMarkdown(resp.text);
+      if (!markdown) throw new Error(`${resp.label} did not return a document.`);
+      state.generated = {
+        markdown,
+        model: resp.model || '',
+        generatedBy: `${resp.label} (${resp.model})`,
+        at: new Date().toISOString(),
+        fileName: documentFileName()
+      };
+      dom.docView.innerHTML = renderMarkdown(state.generated.markdown);
+      const tokens = resp.tokens_out ? `, ${Number(resp.tokens_in || 0).toLocaleString()} tokens in and ${Number(resp.tokens_out).toLocaleString()} out` : '';
+      dom.docStatus.textContent = `Written by ${state.generated.generatedBy}${tokens}. Check the preview, then save it.`;
+      const notes = [];
+      if (resp.redacted) notes.push(`The final check replaced ${plural(resp.redacted, 'credential or ID')} in the prompt before sending it.`);
+      if (entries.length && /\{\{[A-Z0-9_]+\}\}/.test(state.generated.markdown)) {
+        notes.push('Secrets from the function code stay masked in this document, for example {{TOKEN_1}}, because the PDF is attached to a CRM record.');
+      }
+      if (notes.some(Boolean)) {
+        dom.docNotice.textContent = notes.filter(Boolean).join(' ');
+        dom.docNotice.hidden = false;
+      }
+      setDocButtons(true);
+      saveDocumentToCrm({ auto: true });
+    } catch (err) {
+      dom.docStatus.textContent = 'The document could not be written.';
+      dom.docView.innerHTML = `<div class="notice error">${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  async function currentPdfBytes() {
+    if (!state.generated) throw new Error('Generate the document first.');
+    if (!state.generated.pdfBytes) state.generated.pdfBytes = await renderPdfBytes();
+    return state.generated.pdfBytes;
+  }
+
+  async function downloadPdf() {
+    setBusy(dom.btnDownloadPdf, true);
+    try {
+      downloadPdfBytes(await currentPdfBytes(), state.generated.fileName);
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    } finally {
+      setBusy(dom.btnDownloadPdf, !state.generated);
+    }
+  }
+
+  function downloadMarkdown() {
+    if (!state.generated) return;
+    const blob = new Blob([state.generated.markdown], { type: 'text/markdown;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = state.generated.fileName.replace(/\.pdf$/, '.md');
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1500);
+  }
+
+  function renderMarkdown(markdown) {
+    const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    let list = null;
+    let code = null;
+    let table = null;
+    const inline = (text) => escapeHtml(text)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+    const closeList = () => {
+      if (list) { out.push(`</${list}>`); list = null; }
+    };
+    const closeTable = () => {
+      if (!table) return;
+      const [head, ...body] = table;
+      out.push(`<table><thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+      table = null;
+    };
+    const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+
+    lines.forEach((line) => {
+      const fence = /^\s*(```|~~~)/.test(line);
+      if (code !== null) {
+        if (fence) { out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); code = null; }
+        else code.push(line);
+        return;
+      }
+      if (fence) { closeList(); closeTable(); code = []; return; }
+      if (/^\s*\|/.test(line)) {
+        closeList();
+        if (/^\s*\|?\s*:?-{2,}/.test(line) && /^[\s|:-]+$/.test(line)) return;
+        (table = table || []).push(cells(line));
+        return;
+      }
+      closeTable();
+      if (!line.trim()) { closeList(); return; }
+      const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (heading) {
+        closeList();
+        const level = Math.min(heading[1].length, 3);
+        out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+        return;
+      }
+      const item = /^\s*([-*]|\d+\.)\s+(.*)$/.exec(line);
+      if (item) {
+        const kind = /\d/.test(item[1]) ? 'ol' : 'ul';
+        if (list !== kind) { closeList(); out.push(`<${kind}>`); list = kind; }
+        out.push(`<li>${inline(item[2])}</li>`);
+        return;
+      }
+      closeList();
+      if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { out.push('<hr>'); return; }
+      if (/^\s*>/.test(line)) { out.push(`<blockquote>${inline(line.replace(/^\s*>\s?/, ''))}</blockquote>`); return; }
+      out.push(`<p>${inline(line)}</p>`);
+    });
+    if (code !== null) out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+    closeList();
+    closeTable();
+    return out.join('') || '<p class="muted">The model returned no text.</p>';
+  }
+
+  // ==========================================
+  // STEP 5: SAVE TO CRM
+  // ==========================================
+  function renderSaveButton() {
+    const s = state.saved;
+    const btn = dom.btnToSave;
+    if (!state.generated) { btn.textContent = 'Save to CRM'; return; }
+    if (state.saving) btn.textContent = 'Saving to CRM…';
+    else if (s && s.ok) btn.textContent = 'View saved records';
+    else if (s && s.log && !s.log.pending) btn.textContent = 'Save to CRM again';
+    else btn.textContent = 'Save to CRM';
+  }
+
+  function onSaveButton() {
+    if (state.saved && state.saved.ok) {
+      limitSteps(5);
+      goToStep(5);
+      return;
+    }
+    saveDocumentToCrm();
+  }
+
+  async function saveDocumentToCrm({ auto = false } = {}) {
+    if (!state.generated || state.saving) return;
+    const generated = state.generated;
+    state.saving = true;
+    state.saved = { fileName: generated.fileName, at: new Date(), log: { pending: true } };
+    setBusy(dom.btnToSave, true);
+    renderSaveButton();
+    renderSaveCard();
+    let log;
+    try {
+      const bytes = await currentPdfBytes();
+      log = await logDocumentation(bytes);
+    } catch (err) {
+      log = { ok: false, rows: [], message: err.message || String(err) };
+    } finally {
+      state.saving = false;
+      setBusy(dom.btnToSave, false);
+    }
+    if (state.generated !== generated) return;
+    state.saved = { ...state.saved, ok: log.ok, message: log.message, log };
+    limitSteps(5);
+    renderSaveButton();
+    renderSaveCard();
+    if (auto) {
+      const created = (log.rows || []).filter(r => r.saved && r.action === 'Created').length;
+      const updated = (log.rows || []).filter(r => r.saved && r.action === 'Updated').length;
+      if (log.ok) showToast(`Saved to CRM: ${[created && `${created} created`, updated && `${updated} updated`].filter(Boolean).join(', ')}. The PDF is attached.`);
+      else showToast(`The document was not saved to CRM. ${log.message || ''}`.trim(), 'warning');
+    } else {
+      goToStep(5);
+    }
+  }
+
+  function openCrmRecord(entity, id) {
+    if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.UI?.Record?.open) return;
+    ZOHO.CRM.UI.Record.open({ Entity: entity, RecordID: id, Target: '_blank' }).catch(() => null);
+  }
+
+  function renderDocLogResult(log) {
+    if (!log) return '';
+    if (log.pending) return `<div class="doc-log">${loadingBlock(`Creating the PDF and writing ${logModuleApi('documents')}…`)}</div>`;
+    const rows = (log.rows || []).map(r => `
+      <li class="${r.ok ? 'ok' : 'failed'}">
+        <span class="doc-log-name">${escapeHtml(r.label)}</span>
+        <span class="muted small">${escapeHtml(r.type)} · ${escapeHtml(r.action === 'Updated' ? `updated to v${r.version}` : `created v${r.version}`)}</span>
+        ${r.saved ? `<span class="pill ${r.action === 'Updated' ? 'pill-blue' : 'pill-green'}">${escapeHtml(r.action)}</span>` : `<span class="pill pill-red" title="${escapeHtml(r.message)}">Not saved</span>`}
+        ${r.saved ? (r.attached ? '<span class="pill pill-green">PDF attached</span>' : `<span class="pill pill-red" title="${escapeHtml(r.message)}">PDF not attached</span>`) : ''}
+        ${r.id ? `<button type="button" class="link-btn" data-open-record="${escapeHtml(r.id)}">Open</button>` : ''}
+      </li>`).join('');
+    return `
+      <div class="doc-log">
+        <div class="doc-log-head">
+          <strong>Documentation records</strong>
+          <span class="muted small">${escapeHtml(log.entity || logModuleApi('documents'))}</span>
+        </div>
+        ${rows ? `<ul class="doc-log-list">${rows}</ul>` : ''}
+        ${log.ok ? '' : `<div class="notice warning">${escapeHtml(log.message || 'Some records were not saved.')}</div>`}
+      </div>`;
+  }
+
+  function renderSaveCard() {
+    const s = state.saved || {};
+    const rules = state.reviewWorkflows.map(wf => wf.name).join(', ');
+    const entity = logModuleApi('documents');
+    const meta = `
+      <div class="save-meta">
+        <div><span>File</span><span>${escapeHtml(s.fileName || '')}</span></div>
+        <div><span>CRM module</span><span>${escapeHtml(entity)}</span></div>
+        <div><span>Workflow rules</span><span>${escapeHtml(rules)}</span></div>
+        ${state.generated ? `<div><span>Generated by</span><span>${escapeHtml(state.generated.generatedBy || '')}</span></div>` : ''}
+      </div>`;
+    const pending = s.log && s.log.pending;
+    dom.saveCard.innerHTML = pending ? `
+      <h2>Saving to CRM</h2>
+      <p class="muted">Creating the PDF, then creating or updating the documentation record and attaching the file.</p>
+      ${meta}
+      ${renderDocLogResult(s.log)}` : s.ok ? `
+      <div class="save-icon ok">${ICON.check.replace('<svg ', '<svg width="26" height="26" ')}</div>
+      <h2>Saved to CRM</h2>
+      <p class="muted">Every saved document adds one record per workflow rule to ${escapeHtml(entity)}, named v1, v2, v3 and so on. Its functions are listed on that record, and the PDF is attached to it.</p>
+      ${meta}
+      ${renderDocLogResult(s.log)}
+      <div class="save-actions">
+        <button class="btn btn-primary" data-save-action="download">Download PDF</button>
+      </div>` : `
+      <div class="save-icon error">${ICON.cross.replace('<svg ', '<svg width="24" height="24" ')}</div>
+      <h2>The document was not saved to CRM</h2>
+      <p class="muted">${escapeHtml(s.message || 'CRM did not accept the record.')}</p>
+      ${meta}
+      ${renderDocLogResult(s.log)}
+      <div class="save-actions">
+        <button class="btn btn-primary" data-save-action="retry">Try again</button>
+        <button class="btn btn-secondary" data-save-action="download">Download PDF</button>
+      </div>`;
+    dom.saveCard.querySelectorAll('[data-save-action]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.saveAction;
+        if (action === 'download') downloadPdf();
+        if (action === 'retry') saveDocumentToCrm();
+      });
+    });
+    dom.saveCard.querySelectorAll('[data-open-record]').forEach((btn) => {
+      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openRecord));
+    });
+  }
+
+  function startOver() {
+    state.selectedWorkflowIds.clear();
+    state.reviewWorkflows = [];
+    state.generated = null;
+    state.saved = null;
+    limitSteps(2);
+    renderWorkflowTable();
+    goToStep(2);
+  }
+
+  // ==========================================
+  // SETTINGS DRAWER
+  // ==========================================
+  function openSettings() {
+    dom.settingsDocsConn.value = state.settings.docsAgentConnection || '';
+    dom.settingsWdConn.value = state.settings.workdriveConnection || '';
+    dom.settingsWorkDriveFolder.value = state.settings.workdriveFolder === 'folder_living_docs_crm' ? '' : (state.settings.workdriveFolder || '');
+    dom.settingsAudience.value = state.audience;
+    state.clearAiKey = false;
+    dom.settingsAiProvider.value = state.ai.provider || '';
+    dom.settingsAiLabel.value = state.ai.label || '';
+    dom.settingsAiUrl.value = state.ai.apiUrl || '';
+    dom.settingsAiModel.value = state.ai.model || '';
+    dom.settingsAiKey.value = '';
+    dom.settingsAiTestResult.hidden = true;
+    renderAiFields(false);
+    if (state.ai.provider === 'cursor' && state.ai.hasApiKey) loadAiModels(aiFormValues(), dom.settingsAiModelList);
+    renderSettingsRecordStatus();
+    dom.drawerBackdrop.hidden = false;
+    dom.settingsDrawer.classList.add('open');
+    dom.settingsDrawer.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeSettings() {
+    dom.settingsDrawer.classList.remove('open');
+    dom.settingsDrawer.setAttribute('aria-hidden', 'true');
+    dom.drawerBackdrop.hidden = true;
+  }
+
+  const AI_PROVIDER_DEFAULTS = window.LivingDocsAI.PROVIDERS;
+  const AI_URL_HINTS = {
+    anthropic: 'Anthropic Messages API. Keep the default unless you use a proxy.',
+    cursor: 'Cursor Cloud Agents API base URL. Keep https://api.cursor.com unless Cursor gave you another one.'
+  };
+  const AI_KEY_HINTS = {
+    anthropic: 'Create a key in the Anthropic console under Settings > API keys.',
+    cursor: 'Create a user API key at cursor.com/dashboard/api. Each request runs a short cloud agent that is deleted afterwards.'
+  };
+  const AI_MODEL_SUGGESTIONS = {
+    anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-3-5-haiku-latest'],
+    cursor: ['composer-2', 'claude-4.6-sonnet-thinking']
+  };
+  const aiModelCache = {};
+
+  // Fills a datalist with the models the Cursor key can use (GET /v1/models).
+  async function loadAiModels(values, listEl) {
+    if (values.aiProvider !== 'cursor' || !listEl) return;
+    const key = values.aiApiKey || state.aiKeys.cursor || '';
+    if (!key) return;
+    const cacheKey = `${values.aiApiUrl}|${key.slice(-6)}`;
+    try {
+      let models = aiModelCache[cacheKey];
+      if (!models) models = await window.LivingDocsAI.cursorModels({ apiUrl: values.aiApiUrl, apiKey: key });
+      if (models && models.length) {
+        aiModelCache[cacheKey] = models;
+        listEl.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.displayName || m.id)}</option>`).join('');
+      }
+    } catch (_) { /* suggestions stay on the defaults */ }
+  }
+
+  function aiPreset(provider) {
+    return { ...(AI_PROVIDER_DEFAULTS[provider] || {}), ...(state.aiProviders[provider] || {}) };
+  }
+
+  function aiFormValues() {
+    const provider = dom.settingsAiProvider.value;
+    const preset = aiPreset(provider);
+    const typed = dom.settingsAiKey.value.trim();
+    const stored = state.clearAiKey ? '' : (state.aiKeys[provider] || '');
+    return {
+      aiProvider: provider,
+      aiLabel: dom.settingsAiLabel.value.trim(),
+      aiApiUrl: preset.editableUrl === false ? preset.apiUrl : dom.settingsAiUrl.value.trim(),
+      aiModel: dom.settingsAiModel.value.trim(),
+      aiApiKey: typed || stored
+    };
+  }
+
+  function keySavedText(provider) {
+    const key = state.aiKeys[provider] || '';
+    return key ? `Saved on Living_Docs_Settings, ends in …${key.slice(-4)}. Leave blank to keep it.` : (AI_KEY_HINTS[provider] || 'Saved on the Living_Docs_Settings record.');
+  }
+
+  function fillSetupAiForm() {
+    dom.setupAiProvider.value = state.ai.provider || '';
+    dom.setupAiLabel.value = state.ai.label || '';
+    dom.setupAiUrl.value = state.ai.apiUrl || '';
+    dom.setupAiModel.value = state.ai.model || '';
+    dom.setupAiClaudeKey.value = '';
+    dom.setupAiCursorKey.value = '';
+    dom.setupAiTestResult.hidden = true;
+    renderSetupAiFields(false);
+  }
+
+  function renderSetupAiFields(providerChanged) {
+    const provider = dom.setupAiProvider.value;
+    const preset = aiPreset(provider);
+    if (providerChanged && provider) {
+      dom.setupAiLabel.value = preset.label || '';
+      dom.setupAiUrl.value = preset.apiUrl || '';
+      dom.setupAiModel.value = preset.model || '';
+      dom.setupAiTestResult.hidden = true;
+    }
+    if (provider && !dom.setupAiUrl.value) dom.setupAiUrl.value = preset.apiUrl || '';
+    if (provider && !dom.setupAiModel.value) dom.setupAiModel.value = preset.model || '';
+    dom.setupAiLabel.placeholder = preset.label || 'Claude';
+    if (dom.setupAiUrlField) dom.setupAiUrlField.hidden = Boolean(provider && preset.editableUrl === false);
+    dom.setupAiUrlHint.textContent = AI_URL_HINTS[provider] || '';
+    dom.setupAiModelList.innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+    $('setupAiClaudeField').hidden = provider !== 'anthropic';
+    $('setupAiCursorField').hidden = provider !== 'cursor';
+    dom.setupAiClaudeHint.textContent = keySavedText('anthropic');
+    dom.setupAiCursorHint.textContent = keySavedText('cursor');
+    dom.setupAiClaudeKey.placeholder = state.aiKeys.anthropic ? `Saved, ends in …${state.aiKeys.anthropic.slice(-4)}` : 'Paste the Claude API key';
+    dom.setupAiCursorKey.placeholder = state.aiKeys.cursor ? `Saved, ends in …${state.aiKeys.cursor.slice(-4)}` : 'Paste the Cursor API key';
+  }
+
+  function setupAiValues() {
+    const provider = dom.setupAiProvider.value;
+    const preset = aiPreset(provider);
+    const typed = provider === 'cursor' ? dom.setupAiCursorKey.value.trim() : dom.setupAiClaudeKey.value.trim();
+    return {
+      aiProvider: provider,
+      aiLabel: dom.setupAiLabel.value.trim() || preset.label || '',
+      aiApiUrl: preset.editableUrl === false ? preset.apiUrl : (dom.setupAiUrl.value.trim() || preset.apiUrl || ''),
+      aiModel: dom.setupAiModel.value.trim() || preset.model || '',
+      aiApiKey: typed || state.aiKeys[provider] || ''
+    };
+  }
+
+  function captureSetupAi() {
+    const provider = dom.setupAiProvider.value;
+    const preset = aiPreset(provider);
+    const claude = dom.setupAiClaudeKey.value.trim();
+    const cursor = dom.setupAiCursorKey.value.trim();
+    if (claude) state.aiKeys.anthropic = claude;
+    if (cursor) state.aiKeys.cursor = cursor;
+    if (provider) {
+      state.ai.provider = provider;
+      state.ai.label = dom.setupAiLabel.value.trim() || preset.label || '';
+      state.ai.apiUrl = (preset.editableUrl === false ? preset.apiUrl : dom.setupAiUrl.value.trim()) || preset.apiUrl || '';
+      state.ai.model = dom.setupAiModel.value.trim() || preset.model || '';
+    }
+    refreshAiFromKeys();
+  }
+
+  function rememberProviderKey(provider, key, clear) {
+    if (provider !== 'anthropic' && provider !== 'cursor') return;
+    if (key) state.aiKeys[provider] = key;
+    else if (clear) state.aiKeys[provider] = '';
+  }
+
+  // providerChanged: fill in the defaults of the newly chosen provider.
+  function renderAiFields(providerChanged) {
+    const provider = dom.settingsAiProvider.value;
+    const preset = aiPreset(provider);
+    dom.settingsAiFields.hidden = !provider;
+    if (providerChanged && provider) {
+      state.clearAiKey = false;
+      dom.settingsAiLabel.value = preset.label || '';
+      dom.settingsAiUrl.value = preset.apiUrl || '';
+      dom.settingsAiModel.value = preset.model || '';
+      dom.settingsAiKey.value = '';
+      dom.settingsAiTestResult.hidden = true;
+    }
+    if (provider && !dom.settingsAiUrl.value) dom.settingsAiUrl.value = preset.apiUrl || '';
+    if (provider && !dom.settingsAiModel.value) dom.settingsAiModel.value = preset.model || '';
+    dom.settingsAiLabel.placeholder = preset.label || '';
+    const urlField = dom.settingsAiUrl.closest('.field');
+    if (urlField) urlField.hidden = preset.editableUrl === false;
+    dom.settingsAiUrlHint.textContent = AI_URL_HINTS[provider] || '';
+    dom.settingsAiModelList.innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+    const saved = state.aiKeys[provider] || '';
+    const keySaved = Boolean(saved) && !state.clearAiKey;
+    dom.settingsAiKey.placeholder = keySaved ? `Saved, ends in …${saved.slice(-4)}. Leave blank to keep it.` : 'Paste the API key';
+    dom.settingsAiKeyHint.textContent = keySaved
+      ? 'Saved on the Living_Docs_Settings record. Leave blank to keep it.'
+      : `${AI_KEY_HINTS[provider] || ''} Saved on the Living_Docs_Settings record.`.trim();
+    dom.btnClearAiKey.hidden = !keySaved;
+  }
+
+  function showAiTestResult(ok, text, el) {
+    const node = el || dom.settingsAiTestResult;
+    node.hidden = false;
+    node.className = `small ai-test-result ${ok ? 'ok' : 'error'}`;
+    node.textContent = text;
+  }
+
+  function aiConfigFrom(values) {
+    const provider = values.aiProvider;
+    const preset = aiPreset(provider);
+    return {
+      provider,
+      label: values.aiLabel || preset.label || '',
+      apiUrl: values.aiApiUrl || preset.apiUrl || '',
+      model: values.aiModel || preset.model || '',
+      apiKey: String(values.aiApiKey || state.aiKeys[provider] || '').trim()
+    };
+  }
+
+  function currentAiConfig() {
+    return aiConfigFrom({ aiProvider: state.ai.provider, aiLabel: state.ai.label, aiApiUrl: state.ai.apiUrl, aiModel: state.ai.model });
+  }
+
+  function testProvider(values) {
+    return window.LivingDocsAI.testConnection(aiConfigFrom(values));
+  }
+
+  async function testAiConnection(values, resultEl, button, listEl) {
+    const formValues = values && values.aiProvider !== undefined ? values : aiFormValues();
+    const result = resultEl || dom.settingsAiTestResult;
+    const btn = button || dom.btnTestAi;
+    const models = listEl || dom.settingsAiModelList;
+    if (!formValues.aiProvider) { showAiTestResult(false, 'Choose a provider first.', result); return; }
+    if (!formValues.aiApiKey) { showAiTestResult(false, 'Enter the API key.', result); return; }
+    setBusy(btn, true);
+    try {
+      const resp = await testProvider(formValues);
+      const account = resp.account ? ` as ${resp.account}` : '';
+      showAiTestResult(true, `Connected to ${resp.label} (${resp.model})${account} in ${(resp.ms / 1000).toFixed(1)}s.`, result);
+      loadAiModels(formValues, models);
+    } catch (err) {
+      showAiTestResult(false, err.message || String(err), result);
+    } finally {
+      setBusy(btn, false);
+    }
+  }
+
+  function aiIsConfigured() {
+    return Boolean(state.ai.configured || state.hasApiKey) && Boolean(AI_PROVIDER_DEFAULTS[state.ai.provider]);
+  }
+
+  // AI actions wait here until Claude or Cursor is tested and saved. Resolves false if the user cancels.
+  async function ensureAiConfigured(action) {
+    if (aiIsConfigured()) return true;
+    let values = {
+      aiProvider: AI_PROVIDER_DEFAULTS[state.ai.provider] ? state.ai.provider : 'anthropic',
+      aiModel: AI_PROVIDER_DEFAULTS[state.ai.provider] ? state.ai.model : '',
+      aiApiKey: ''
+    };
+    let error = '';
+    for (;;) {
+      const next = await aiSetupDialog(action, values, error);
+      if (!next) {
+        showToast(`Set up Claude or Cursor to ${action}.`, 'warning');
+        return false;
+      }
+      values = next;
+      try {
+        const test = await testProvider(next);
+        rememberProviderKey(next.aiProvider, next.aiApiKey, false);
+        state.ai.provider = next.aiProvider;
+        state.ai.label = next.aiLabel || aiPreset(next.aiProvider).label || '';
+        state.ai.apiUrl = next.aiApiUrl || aiPreset(next.aiProvider).apiUrl || '';
+        state.ai.model = next.aiModel || aiPreset(next.aiProvider).model || '';
+        refreshAiFromKeys();
+        const saved = await saveSettingsRecord();
+        if (!saved.ok) throw new Error(saved.message || 'Living_Docs_Settings could not be saved.');
+        if (!aiIsConfigured()) throw new Error('The API key was not saved on Living_Docs_Settings.');
+        showToast(`${test.label || aiName()} is connected (${test.model}).`);
+        return true;
+      } catch (err) {
+        error = err.message || String(err);
+      }
+    }
+  }
+
+  function aiSetupDialog(action, values, error) {
+    const providerOptions = Object.entries(AI_PROVIDER_DEFAULTS)
+      .map(([id, p]) => `<option value="${id}"${id === values.aiProvider ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('');
+    const pending = confirmDialog({
+      title: 'Set up AI first',
+      confirmLabel: 'Test and save',
+      html: `
+        <p>You need an AI provider to ${escapeHtml(action)}. Choose Claude or Cursor and paste an API key. The key is tested, then saved on the Living_Docs_Settings record.</p>
+        ${error ? `<div class="notice error">${escapeHtml(error)}</div>` : ''}
+        <label class="field"><span>Provider</span><select id="aiSetupProvider">${providerOptions}</select></label>
+        <label class="field"><span>API URL</span><input type="url" id="aiSetupUrl" spellcheck="false" value="${escapeHtml(values.aiApiUrl || '')}" /></label>
+        <label class="field"><span>API key <span class="req">required</span></span><input type="password" id="aiSetupKey" autocomplete="off" data-required value="${escapeHtml(values.aiApiKey || '')}" /></label>
+        <label class="field"><span>Model</span><input type="text" id="aiSetupModel" list="aiSetupModels" value="${escapeHtml(values.aiModel || '')}" /><datalist id="aiSetupModels"></datalist></label>
+        <p class="muted small" id="aiSetupHint"></p>
+        <p class="muted small">IDs, org IDs and tokens are masked before anything is sent to the AI.</p>`
+    });
+    const providerEl = $('aiSetupProvider');
+    const modelEl = $('aiSetupModel');
+    const keyEl = $('aiSetupKey');
+    const urlEl = $('aiSetupUrl');
+    const current = { ...values };
+    const sync = (providerChanged) => {
+      const provider = providerEl.value;
+      const preset = aiPreset(provider);
+      if (providerChanged || !modelEl.value.trim()) modelEl.value = preset.model || '';
+      if (providerChanged || !urlEl.value.trim()) {
+        urlEl.value = (provider === state.ai.provider && state.ai.apiUrl) || preset.apiUrl || '';
+      }
+      if (providerChanged) $('aiSetupModels').innerHTML = '';
+      if (!$('aiSetupModels').children.length) {
+        $('aiSetupModels').innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+      }
+      $('aiSetupHint').textContent = AI_KEY_HINTS[provider] || '';
+      current.aiProvider = provider;
+      current.aiLabel = preset.label;
+      current.aiApiUrl = urlEl.value.trim() || preset.apiUrl;
+      current.aiModel = modelEl.value.trim() || preset.model;
+      current.aiApiKey = keyEl.value.trim();
+    };
+    providerEl.addEventListener('change', () => sync(true));
+    [modelEl, keyEl, urlEl].forEach(el => el.addEventListener('input', () => sync(false)));
+    keyEl.addEventListener('change', () => { sync(false); loadAiModels(current, $('aiSetupModels')); });
+    sync(false);
+    if (current.aiApiKey) loadAiModels(current, $('aiSetupModels'));
+    return pending.then(answer => (answer ? { ...current } : null));
+  }
+
+  async function saveSettings() {
+    state.settings.docsAgentConnection = dom.settingsDocsConn.value.trim() || 'docsagent_connection';
+    state.settings.workdriveConnection = dom.settingsWdConn.value.trim() || 'workdrive_connection';
+    state.settings.workdriveFolder = dom.settingsWorkDriveFolder.value.trim();
+    state.audience = dom.settingsAudience.value;
+    localStorage.setItem('livingdocs.audience', state.audience);
+    const ai = aiFormValues();
+    if (ai.aiProvider && (!ai.aiApiUrl || !ai.aiModel)) {
+      showToast('Enter the API URL and model for the AI provider.', 'warning');
+      return;
+    }
+
+    setBusy(dom.btnSaveSettings, true);
+    try {
+      rememberProviderKey(ai.aiProvider, dom.settingsAiKey.value.trim(), state.clearAiKey);
+      if (ai.aiProvider) {
+        state.ai.provider = ai.aiProvider;
+        state.ai.label = ai.aiLabel;
+        state.ai.apiUrl = ai.aiApiUrl;
+        state.ai.model = ai.aiModel;
+        refreshAiFromKeys();
+      }
+      const saved = await saveSettingsRecord();
+      if (!saved.ok) throw new Error(saved.message || 'Living_Docs_Settings could not be saved.');
+      dom.settingsAiKey.value = '';
+      state.clearAiKey = false;
+      renderSettingsRecordStatus();
+      renderAiFields(false);
+      showToast(state.ai.provider && !state.ai.hasApiKey ? 'Settings saved. Add the API key to use the AI provider.' : 'Settings saved on Living_Docs_Settings.');
+      closeSettings();
+      if (state.reviewWorkflows.length) renderReview();
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    } finally {
+      setBusy(dom.btnSaveSettings, false);
+    }
+  }
+
 
   function escapeHtml(str) {
     return String(str || '')

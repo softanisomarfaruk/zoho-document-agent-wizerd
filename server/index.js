@@ -12,6 +12,8 @@ const serveIndex = require('serve-index');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const { markdownToPdf } = require('./pdf');
+const ai = require('./ai');
 
 process.env.PWD = process.env.PWD || process.cwd();
 
@@ -36,9 +38,12 @@ expressApp.use((req, res, next) => {
 
 // Settings in-memory / persistent
 let appSettings = {
-  claudeApiKey: process.env.ANTHROPIC_API_KEY || '',
-  claudeModel: 'claude-3-5-sonnet-20241022',
-  claudeApiUrl: 'https://api.anthropic.com/v1/messages',
+  // No AI is bundled. The admin chooses a provider in Settings; the key is stored encrypted.
+  aiProvider: '',
+  aiLabel: '',
+  aiApiUrl: '',
+  aiModel: '',
+  aiApiKeyEnc: '',
   maxTokens: 4000,
   temperature: 0.2,
   workdriveDefaultFolder: 'folder_living_docs_crm',
@@ -46,8 +51,131 @@ let appSettings = {
   mode: 'hybrid', // hybrid, live_zoho, simulation
   // Zoho Named Connections (no raw OAuth tokens stored)
   docsAgentConnection: process.env.DOCS_AGENT_CONNECTION || 'docsagent_connection',
-  workdriveConnection: process.env.WORKDRIVE_CONNECTION || 'workdrive_connection'
+  workdriveConnection: process.env.WORKDRIVE_CONNECTION || 'workdrive_connection',
+  scheduleFrequency: 'daily',
+  settingsRecordId: null
 };
+
+const settingsFilePath = path.join(__dirname, 'data', 'settings.json');
+const liveCache = {
+  snapshot: null,
+  baseline: null
+};
+
+function loadPersistedSettings() {
+  try {
+    if (!fs.existsSync(settingsFilePath)) return;
+    const saved = JSON.parse(fs.readFileSync(settingsFilePath, 'utf8'));
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      Object.assign(appSettings, saved);
+    }
+  } catch (err) {
+    console.warn('[Settings] Could not read settings file:', err.message);
+  }
+  // Older versions kept a plain-text Claude key; move it to the encrypted provider settings.
+  if (appSettings.claudeApiKey) {
+    if (!appSettings.aiApiKeyEnc) {
+      appSettings.aiProvider = 'anthropic';
+      appSettings.aiLabel = appSettings.aiLabel || 'Claude';
+      appSettings.aiApiUrl = appSettings.claudeApiUrl || ai.PROVIDERS.anthropic.apiUrl;
+      appSettings.aiModel = appSettings.aiModel || appSettings.claudeModel || ai.PROVIDERS.anthropic.model;
+      appSettings.aiApiKeyEnc = ai.encryptSecret(appSettings.claudeApiKey);
+    }
+    delete appSettings.claudeApiKey;
+    delete appSettings.claudeApiUrl;
+    delete appSettings.claudeModel;
+    persistSettings();
+  }
+}
+
+function persistSettings() {
+  const dir = path.dirname(settingsFilePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const { claudeApiKey, ...rest } = appSettings;
+  const singleRecord = {
+    ...rest,
+    updatedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(settingsFilePath, JSON.stringify(singleRecord, null, 2), { mode: 0o600 });
+}
+
+loadPersistedSettings();
+
+function aiConfig() {
+  const spec = ai.PROVIDERS[appSettings.aiProvider];
+  if (!spec) return { provider: '', label: '', apiUrl: '', model: '', apiKey: '' };
+  return {
+    provider: appSettings.aiProvider,
+    label: appSettings.aiLabel || spec.label,
+    apiUrl: spec.editableUrl ? (appSettings.aiApiUrl || spec.apiUrl) : spec.apiUrl,
+    model: appSettings.aiModel || spec.model,
+    apiKey: ai.decryptSecret(appSettings.aiApiKeyEnc)
+  };
+}
+
+function aiConfigured() {
+  const cfg = aiConfig();
+  return Boolean(cfg.provider && cfg.apiUrl && cfg.model && cfg.apiKey);
+}
+
+function aiNotConfiguredResponse(res, action) {
+  return res.status(412).json({
+    status: 'error',
+    code: 'AI_NOT_CONFIGURED',
+    error: `Set up an AI provider (Claude or Cursor) in Settings before you ${action}.`
+  });
+}
+
+function publicAiSettings() {
+  const cfg = aiConfig();
+  return {
+    provider: cfg.provider || '',
+    label: cfg.label || '',
+    apiUrl: cfg.apiUrl || '',
+    model: cfg.model || '',
+    hasApiKey: Boolean(cfg.apiKey),
+    keyHint: cfg.apiKey ? cfg.apiKey.slice(-4) : '',
+    configured: aiConfigured()
+  };
+}
+
+function aiDisplayName(result) {
+  const cfg = aiConfig();
+  const label = (result && result.label) || cfg.label || 'AI';
+  const model = (result && result.model) || cfg.model;
+  return model ? `${label} (${model})` : label;
+}
+
+// The key, provider URL and backups must not be reachable from other sites.
+function sameOriginOnly(req, res, next) {
+  res.removeHeader('Access-Control-Allow-Origin');
+  const origin = req.headers.origin;
+  if (origin) {
+    let host = '';
+    try { host = new URL(origin).host; } catch (_) { host = ''; }
+    if (host !== req.headers.host) {
+      return res.status(403).json({ status: 'error', error: 'Cross-origin requests are not allowed for this endpoint.' });
+    }
+  }
+  next();
+}
+
+function emptyLiveSnapshot() {
+  return {
+    id: 'snap_empty',
+    timestamp: new Date().toISOString(),
+    source: 'none',
+    stats: {
+      total_modules: 0,
+      total_fields: 0,
+      total_workflows: 0,
+      total_blueprints: 0,
+      total_functions: 0
+    },
+    modules: [],
+    functions: []
+  };
+}
 
 // State Store (Simulating Catalyst DataStore)
 const dataStore = {
@@ -210,9 +338,10 @@ function hashComponent(obj) {
 }
 
 // 0. Auto-Provision Custom Module via Zoho CRM API v8
-expressApp.post('/api/zoho/provision-modules', async (req, res) => {
+expressApp.post('/api/zoho/provision-modules', async (req, res, next) => {
   try {
     const { accessToken, domain = 'www.zohoapis.com' } = req.body;
+    if (!accessToken) return next();
     console.log('[Auto-Provision] Verifying & Creating Living_Docs_Snapshots module...');
 
     const modulePayload = {
@@ -344,45 +473,176 @@ expressApp.get('/api/settings', (req, res) => {
   res.json({
     status: 'success',
     settings: {
-      claudeModel: appSettings.claudeModel,
-      claudeApiUrl: appSettings.claudeApiUrl,
+      ai: publicAiSettings(),
+      aiProviders: ai.PROVIDERS,
       maxTokens: appSettings.maxTokens,
       temperature: appSettings.temperature,
-      hasApiKey: Boolean(appSettings.claudeApiKey && appSettings.claudeApiKey.length > 5),
+      hasApiKey: aiConfigured(),
       workdriveDefaultFolder: appSettings.workdriveDefaultFolder,
       crmOrgId: appSettings.crmOrgId,
       mode: appSettings.mode,
       // Connection link names (no secrets, just the connection identifiers)
       docsAgentConnection: appSettings.docsAgentConnection,
-      workdriveConnection: appSettings.workdriveConnection
+      workdriveConnection: appSettings.workdriveConnection,
+      scheduleFrequency: appSettings.scheduleFrequency,
+      settingsRecordId: appSettings.settingsRecordId || null,
+      storage: 'single_record'
     }
   });
 });
 
-expressApp.post('/api/settings', (req, res) => {
-  const { claudeApiKey, claudeModel, maxTokens, temperature, workdriveDefaultFolder, mode, docsAgentConnection, workdriveConnection } = req.body;
-  if (claudeApiKey !== undefined) appSettings.claudeApiKey = claudeApiKey.trim();
-  if (claudeModel) appSettings.claudeModel = claudeModel;
+function readAiInput(body, base) {
+  const next = { ...base };
+  if (typeof body.aiProvider === 'string') {
+    const provider = body.aiProvider.trim();
+    if (provider && !ai.PROVIDERS[provider]) return { error: `Unknown AI provider "${provider}".` };
+    next.provider = provider;
+  }
+  if (typeof body.aiLabel === 'string') next.label = body.aiLabel.trim().slice(0, 60);
+  else if (next.provider !== base.provider) next.label = '';
+  if (next.provider !== base.provider && typeof body.aiModel !== 'string') next.model = '';
+  if (next.provider !== base.provider && typeof body.aiApiUrl !== 'string') next.apiUrl = '';
+  if (typeof body.aiModel === 'string') next.model = body.aiModel.trim().slice(0, 120);
+  const spec = ai.PROVIDERS[next.provider];
+  if (spec && !spec.editableUrl) {
+    next.apiUrl = spec.apiUrl;
+  } else if (typeof body.aiApiUrl === 'string') {
+    const url = body.aiApiUrl.trim();
+    if (url) {
+      const check = ai.validateApiUrl(url);
+      if (!check.ok) return { error: check.error };
+      next.apiUrl = check.url;
+    } else {
+      next.apiUrl = '';
+    }
+  }
+  if (spec) {
+    if (!next.apiUrl) next.apiUrl = spec.apiUrl;
+    if (!next.model) next.model = spec.model;
+  }
+  const newKey = typeof body.aiApiKey === 'string' ? body.aiApiKey.trim() : '';
+  if (newKey) {
+    next.apiKey = newKey;
+  } else if (body.clearApiKey || !next.provider) {
+    next.apiKey = '';
+  } else if (base.apiKey && (next.provider !== base.provider || ai.hostOf(next.apiUrl) !== ai.hostOf(base.apiUrl))) {
+    // A saved key is never sent to a new host unless the admin enters it again.
+    next.apiKey = '';
+    next.keyDropped = true;
+  }
+  return { cfg: next };
+}
+
+expressApp.post('/api/ai/test', sameOriginOnly, async (req, res) => {
+  const input = readAiInput(req.body || {}, aiConfig());
+  if (input.error) return res.status(400).json({ status: 'error', error: input.error });
+  const cfg = input.cfg;
+  if (!cfg.provider) return res.status(400).json({ status: 'error', error: 'Choose an AI provider first.' });
+  if (!cfg.apiUrl || !cfg.model) return res.status(400).json({ status: 'error', error: 'API URL and model are required.' });
+  if (!cfg.apiKey) {
+    return res.status(400).json({
+      status: 'error',
+      error: input.cfg.keyDropped ? 'The provider or API URL host changed, so enter the API key again.' : 'Enter the API key.'
+    });
+  }
+  const started = Date.now();
+  if (cfg.provider === 'cursor') {
+    try {
+      const check = await ai.testCursor(cfg);
+      return res.json({ status: 'success', model: check.model, label: cfg.label || 'Cursor', reply: check.account, ms: Date.now() - started });
+    } catch (err) {
+      return res.status(502).json({ status: 'error', error: err.message });
+    }
+  }
+  try {
+    const result = await ai.callAi(cfg, {
+      system: 'You are a connection test. Reply with the single word OK.',
+      user: 'Reply with OK.',
+      maxTokens: 16,
+      temperature: 0
+    });
+    res.json({
+      status: 'success',
+      model: result.model,
+      label: result.label,
+      reply: String(result.text || '').trim().slice(0, 60),
+      ms: Date.now() - started
+    });
+  } catch (err) {
+    res.status(502).json({ status: 'error', error: err.message });
+  }
+});
+
+// Model ids for the Cursor key (GET /v1/models); used to fill the model suggestions.
+expressApp.post('/api/ai/models', sameOriginOnly, async (req, res) => {
+  const input = readAiInput(req.body || {}, aiConfig());
+  if (input.error) return res.status(400).json({ status: 'error', error: input.error });
+  const cfg = input.cfg;
+  if (cfg.provider !== 'cursor') return res.json({ status: 'success', models: [] });
+  if (!cfg.apiKey) return res.status(400).json({ status: 'error', error: 'Enter the API key.' });
+  try {
+    res.json({ status: 'success', models: await ai.cursorModels(cfg) });
+  } catch (err) {
+    res.status(502).json({ status: 'error', error: err.message });
+  }
+});
+
+expressApp.post('/api/settings', sameOriginOnly, (req, res) => {
+  const { maxTokens, temperature, workdriveDefaultFolder, mode, docsAgentConnection, workdriveConnection, scheduleFrequency, settingsRecordId } = req.body;
+  const body = { ...req.body };
+  // Older widgets sent only claudeApiKey / claudeModel.
+  if (typeof body.claudeApiKey === 'string' && body.claudeApiKey.trim() && body.aiApiKey === undefined
+    && (!appSettings.aiProvider || appSettings.aiProvider === 'anthropic')) {
+    body.aiApiKey = body.claudeApiKey;
+    if (!body.aiProvider && !appSettings.aiProvider) {
+      body.aiProvider = 'anthropic';
+      body.aiLabel = body.aiLabel || 'Claude';
+      body.aiApiUrl = body.aiApiUrl || ai.PROVIDERS.anthropic.apiUrl;
+      body.aiModel = body.aiModel || body.claudeModel || ai.PROVIDERS.anthropic.model;
+    }
+  }
+  const touchesAi = ['aiProvider', 'aiLabel', 'aiApiUrl', 'aiModel', 'aiApiKey', 'clearApiKey'].some(k => body[k] !== undefined);
+  let keyDropped = false;
+  if (touchesAi) {
+    const input = readAiInput(body, aiConfig());
+    if (input.error) return res.status(400).json({ status: 'error', error: input.error });
+    const cfg = input.cfg;
+    appSettings.aiProvider = cfg.provider || '';
+    appSettings.aiLabel = cfg.provider ? (cfg.label || ai.PROVIDERS[cfg.provider].label) : '';
+    appSettings.aiApiUrl = cfg.provider ? (cfg.apiUrl || ai.PROVIDERS[cfg.provider].apiUrl) : '';
+    appSettings.aiModel = cfg.provider ? (cfg.model || ai.PROVIDERS[cfg.provider].model) : '';
+    appSettings.aiApiKeyEnc = cfg.apiKey ? ai.encryptSecret(cfg.apiKey) : '';
+    keyDropped = Boolean(cfg.keyDropped);
+  }
   if (maxTokens) appSettings.maxTokens = parseInt(maxTokens, 10);
   if (temperature !== undefined) appSettings.temperature = parseFloat(temperature);
   if (workdriveDefaultFolder) appSettings.workdriveDefaultFolder = workdriveDefaultFolder;
   if (mode) appSettings.mode = mode;
+  if (scheduleFrequency) appSettings.scheduleFrequency = scheduleFrequency;
+  if (settingsRecordId) appSettings.settingsRecordId = String(settingsRecordId);
   // Store connection names — these are just string identifiers, NOT tokens
   if (docsAgentConnection) appSettings.docsAgentConnection = docsAgentConnection.trim();
   if (workdriveConnection) appSettings.workdriveConnection = workdriveConnection.trim();
 
-  console.log(`[Settings] Updated — docsAgentConnection: ${appSettings.docsAgentConnection}, workdriveConnection: ${appSettings.workdriveConnection}`);
+  persistSettings();
+  console.log(`[Settings] Updated single record — docsAgentConnection: ${appSettings.docsAgentConnection}, crmRecord: ${appSettings.settingsRecordId || 'none'}`);
 
   res.json({
     status: 'success',
-    message: 'Settings updated and stored in Living_Docs_Settings module.',
+    message: keyDropped
+      ? 'Settings saved. The provider or API URL host changed, so the saved API key was removed. Enter it again.'
+      : 'Settings saved.',
+    keyDropped,
     settings: {
-      claudeModel: appSettings.claudeModel,
-      hasApiKey: Boolean(appSettings.claudeApiKey && appSettings.claudeApiKey.length > 5),
+      ai: publicAiSettings(),
+      hasApiKey: aiConfigured(),
       workdriveDefaultFolder: appSettings.workdriveDefaultFolder,
       mode: appSettings.mode,
       docsAgentConnection: appSettings.docsAgentConnection,
-      workdriveConnection: appSettings.workdriveConnection
+      workdriveConnection: appSettings.workdriveConnection,
+      scheduleFrequency: appSettings.scheduleFrequency,
+      settingsRecordId: appSettings.settingsRecordId || null,
+      storage: 'single_record'
     }
   });
 });
@@ -443,18 +703,42 @@ expressApp.post('/api/zoho/provision-modules', (req, res) => {
   });
 });
 
-// 2. Scan CRM Metadata
+// 2. Scan CRM Metadata — accepts a live widget payload. Does not invent sample CRM data.
 expressApp.post('/api/scan', (req, res) => {
   try {
-    const snapshot = buildSnapshot();
-    res.json({
+    const incoming = req.body && req.body.snapshot;
+    if (incoming && incoming.stats) {
+      if (!liveCache.baseline) liveCache.baseline = JSON.parse(JSON.stringify(incoming));
+      liveCache.snapshot = incoming;
+      return res.json({ status: 'success', source: 'zoho_live', snapshot: incoming });
+    }
+    if (liveCache.snapshot) {
+      return res.json({ status: 'success', source: 'zoho_live_cache', snapshot: liveCache.snapshot });
+    }
+    return res.json({
       status: 'success',
-      snapshot
+      source: 'empty',
+      message: 'No live CRM snapshot yet. Open the widget inside Zoho CRM and run a scan.',
+      snapshot: emptyLiveSnapshot()
     });
   } catch (err) {
     console.error('Scan error:', err);
     res.status(500).json({ status: 'error', error: err.message });
   }
+});
+
+expressApp.post('/api/live-cache', (req, res) => {
+  const snapshot = req.body && req.body.snapshot;
+  if (!snapshot || !snapshot.stats) {
+    return res.status(400).json({ status: 'error', error: 'snapshot is required' });
+  }
+  if (!liveCache.baseline) liveCache.baseline = JSON.parse(JSON.stringify(snapshot));
+  liveCache.snapshot = snapshot;
+  res.json({
+    status: 'success',
+    workflows: snapshot.stats.total_workflows || 0,
+    modules: snapshot.stats.total_modules || 0
+  });
 });
 
 // 3. Get Snapshots
@@ -579,7 +863,7 @@ function formatWorkflowV8(wf, moduleName, moduleComponentId) {
 // Scopes: ZohoCRM.settings.workflow_rules.READ (or ALL)
 const getAllWorkflowsHandler = (req, res) => {
   try {
-    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const latestSnapshot = liveCache.snapshot || emptyLiveSnapshot();
     const workflows = [];
     const moduleFilter = req.query.module;
     const statusActiveFilter = req.query.status_active;
@@ -588,20 +872,24 @@ const getAllWorkflowsHandler = (req, res) => {
     (latestSnapshot.modules || []).forEach(m => {
       if (moduleFilter && moduleFilter.toUpperCase() !== 'ALL' && m.module !== moduleFilter) return;
       (m.workflows || []).forEach(wf => {
-        const formatted = formatWorkflowV8(wf, m.module, m.component_id);
+        const formatted = wf.execute_when ? { ...wf, module: wf.module || { api_name: m.module, id: m.component_id } } : formatWorkflowV8(wf, m.module, m.component_id);
+        const moduleName = typeof formatted.module === 'string'
+          ? formatted.module
+          : ((formatted.module && formatted.module.api_name) || m.module || '');
+        const isActive = formatted.status === 'active' || formatted.active === true || (formatted.status && formatted.status.active === true);
 
-        // Status filter
         if (statusActiveFilter !== undefined && statusActiveFilter !== '') {
           const wantActive = statusActiveFilter === 'true' || statusActiveFilter === true;
-          if (formatted.status.active !== wantActive) return;
+          if (isActive !== wantActive) return;
         }
 
-        // Search query filter
         if (searchQuery) {
-          const matchName = formatted.name.toLowerCase().includes(searchQuery);
-          const matchMod = formatted.module.api_name.toLowerCase().includes(searchQuery);
-          const matchId = formatted.id.toLowerCase().includes(searchQuery);
-          const matchCrit = (formatted.execute_when.details.criteria || '').toLowerCase().includes(searchQuery);
+          const crit = formatted.criteria || (formatted.execute_when && formatted.execute_when.details && formatted.execute_when.details.criteria) || '';
+          const critText = typeof crit === 'string' ? crit : JSON.stringify(crit);
+          const matchName = String(formatted.name || '').toLowerCase().includes(searchQuery);
+          const matchMod = String(moduleName).toLowerCase().includes(searchQuery);
+          const matchId = String(formatted.id || '').toLowerCase().includes(searchQuery);
+          const matchCrit = critText.toLowerCase().includes(searchQuery);
           if (!matchName && !matchMod && !matchId && !matchCrit) return;
         }
 
@@ -635,7 +923,7 @@ const getAllWorkflowsHandler = (req, res) => {
 const getSingleWorkflowHandler = (req, res) => {
   try {
     const targetId = req.params.id;
-    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const latestSnapshot = liveCache.snapshot || emptyLiveSnapshot();
     let foundWf = null;
     let foundModule = null;
 
@@ -679,11 +967,31 @@ expressApp.get('/api/crm/workflows/:id', getSingleWorkflowHandler);
 expressApp.get('/crm/v8/settings/automation/workflow_rules', getAllWorkflowsHandler);
 expressApp.get('/crm/v8/settings/automation/workflow_rules/:id', getSingleWorkflowHandler);
 
-// 4. Generate Documentation via Claude / High-Fidelity Engine
-expressApp.post('/api/generate', async (req, res) => {
+// 4. Generate Documentation via the configured AI provider (Claude or Cursor)
+// Returns the exact system and user prompt /api/generate would send, so the widget can show and edit it.
+expressApp.post('/api/generate/prompt', (req, res) => {
   try {
-    const { doc_type = 'technical', audience = 'admin', custom_prompt, selected_workflows, workflow_ids } = req.body;
-    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const { audience = 'admin', selected_workflows, snapshot: incomingSnapshot } = req.body || {};
+    if (!Array.isArray(selected_workflows) || !selected_workflows.length) {
+      return res.status(400).json({ status: 'error', error: 'selected_workflows is required.' });
+    }
+    const snapshot = (incomingSnapshot && (incomingSnapshot.modules || incomingSnapshot.stats))
+      ? incomingSnapshot
+      : (liveCache.snapshot || emptyLiveSnapshot());
+    const built = buildWorkflowPrompt(selected_workflows, snapshot, audience);
+    res.json({ status: 'success', ...built, model: aiConfigured() ? aiDisplayName() : '', has_api_key: aiConfigured() });
+  } catch (err) {
+    console.error('Prompt build error:', err);
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+expressApp.post('/api/generate', sameOriginOnly, async (req, res) => {
+  try {
+    const { doc_type = 'technical', audience = 'admin', custom_prompt, prompt_override, selected_workflows, workflow_ids, snapshot: incomingSnapshot } = req.body;
+    const latestSnapshot = (incomingSnapshot && (incomingSnapshot.modules || incomingSnapshot.stats))
+      ? incomingSnapshot
+      : (liveCache.snapshot || emptyLiveSnapshot());
 
     // Determine target workflows if workflow_spec or selected_workflows provided
     let targetWorkflows = selected_workflows;
@@ -697,96 +1005,61 @@ expressApp.post('/api/generate', async (req, res) => {
 
     const isWorkflowDoc = (doc_type === 'workflow_spec' || (targetWorkflows && targetWorkflows.length > 0));
 
-    // Call Claude API if API Key provided
-    if (appSettings.claudeApiKey && appSettings.claudeApiKey.startsWith('sk-ant-')) {
+    if (!aiConfigured()) return aiNotConfiguredResponse(res, 'generate documentation');
+    {
       try {
-        const systemPrompt = `You are the Zoho Living Documentation Agent. You generate authoritative, structured, professional technical documentation for Zoho CRM systems.
-CRITICAL RULES:
-1. Output valid, clean Markdown only.
-2. Document ONLY what is present in the configuration JSON. Mark unknowns as 'Not determined' rather than guessing.
-3. For automations and state flows, include Mermaid diagrams (\`\`\`mermaid ... \`\`\`).
-4. Tag sections with Source Component IDs in bracketed badges (e.g. \`[Component: mod_Leads]\`, \`[Workflow: wf_Lead_Auto_Convert]\`).
-5. Append footer: '> *AI-generated Living Documentation · Reviewed by: ____________*'`;
-
+        let systemPrompt = WORKFLOW_SYSTEM_PROMPT;
         let userPrompt = '';
-        if (isWorkflowDoc && targetWorkflows && targetWorkflows.length > 0) {
-          userPrompt = `Generate a dedicated Zoho CRM Workflow Automation Architecture & Engineering Specification for ${targetWorkflows.length} specific workflow rule(s) for audience: ${audience}.
-Selected Workflow Rules:
-${JSON.stringify(targetWorkflows, null, 2)}
-
-Full Context Snapshot:
-${JSON.stringify(latestSnapshot, null, 2)}
-
-Structure the response with:
-# 1. Executive Workflow Automation Summary & Execution Hierarchy
-# 2. Trigger-Condition-Action (TCA) Engineering Matrix
-# 3. End-to-End Workflow Flowchart (Mermaid syntax)
-# 4. Integrations, Webhook Payloads & Deluge Dependencies
-# 5. Failure Modes, Race Conditions & Loop Prevention Analysis
-# 6. Administration, Maintenance & Audit Log`;
+        if (prompt_override && typeof prompt_override.user === 'string' && prompt_override.user.trim()) {
+          if (typeof prompt_override.system === 'string' && prompt_override.system.trim()) systemPrompt = prompt_override.system;
+          userPrompt = prompt_override.user;
+        } else if (isWorkflowDoc && targetWorkflows && targetWorkflows.length > 0) {
+          const built = buildWorkflowPrompt(targetWorkflows, latestSnapshot, audience);
+          systemPrompt = built.system;
+          userPrompt = built.user;
         } else {
-          userPrompt = `Generate a complete ${doc_type} documentation suite for audience: ${audience}.
-Active Zoho CRM Snapshot:
-${JSON.stringify(latestSnapshot, null, 2)}
+          userPrompt = `Audience: ${audience}
 
-Include:
-# 1. Executive Summary & Architecture Overview
-# 2. Complete Module & Field Dictionary (with detailed markdown tables)
-# 3. Automation Map & Workflow Logic (with Mermaid flowchart)
-# 4. Blueprint State Transition Specs (with Mermaid state diagram)
-# 5. Custom Functions, Webhooks & Integrations
-# 6. Maintenance & Governance Guide`;
+Write a ${doc_type} document from this Zoho CRM snapshot. Include an executive summary, a field table for each module, each workflow's trigger and actions, and each blueprint. Do not invent configuration that is not in the snapshot. Do not use mermaid or HTML.
+
+Snapshot:
+${clipForModel(JSON.stringify(stripIdentifiers(latestSnapshot)), DOC_INPUT_CHAR_BUDGET)}`;
         }
 
-        const claudeResp = await fetch(appSettings.claudeApiUrl, {
-          method: 'POST',
-          headers: {
-            'x-api-key': appSettings.claudeApiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: appSettings.claudeModel,
-            max_tokens: appSettings.maxTokens,
-            temperature: appSettings.temperature,
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userPrompt }]
-          })
+        const result = await ai.callAi(aiConfig(), {
+          system: systemPrompt,
+          user: userPrompt,
+          maxTokens: Math.max(appSettings.maxTokens || 0, 8000),
+          temperature: appSettings.temperature
         });
-
-        const claudeData = await claudeResp.json();
-        if (claudeData.content && claudeData.content.length > 0) {
-          const markdown = claudeData.content[0].text;
+        if (String(result.text || '').trim()) {
+          const markdown = result.text;
           dataStore.generatedDocs[latestSnapshot.id] = markdown;
           return res.json({
             status: 'success',
-            model: claudeData.model,
-            tokens_in: claudeData.usage ? claudeData.usage.input_tokens : 0,
-            tokens_out: claudeData.usage ? claudeData.usage.output_tokens : 0,
-            markdown,
-            snapshot_id: latestSnapshot.id
+            ...documentationPayload(markdown, {
+              model: result.model,
+              ai_provider: result.provider,
+              ai_label: result.label,
+              generated_by: aiDisplayName(result),
+              redacted: result.redacted,
+              tokens_in: result.tokens_in,
+              tokens_out: result.tokens_out,
+              snapshot_id: latestSnapshot.id
+            })
           });
         }
-      } catch (claudeErr) {
-        console.warn('[Claude API Failed, using high-fidelity local engine]:', claudeErr.message);
+        throw new Error(`${result.label} returned an empty answer.`);
+      } catch (aiErr) {
+        const label = aiConfig().label || 'The AI provider';
+        console.warn('[AI provider failed]:', aiErr.message);
+        return res.status(502).json({
+          status: 'error',
+          code: 'AI_FAILED',
+          error: `${label} could not write the document: ${aiErr.message || 'request failed'}`
+        });
       }
     }
-
-    // High-Fidelity Local Markdown Generator
-    const markdown = isWorkflowDoc && targetWorkflows && targetWorkflows.length > 0
-      ? generateWorkflowSpecDoc(targetWorkflows, latestSnapshot, audience)
-      : generateRichLivingDoc(latestSnapshot, doc_type, audience);
-
-    dataStore.generatedDocs[latestSnapshot.id] = markdown;
-
-    res.json({
-      status: 'success',
-      model: 'living-docs-claude-engine-v2.1',
-      tokens_in: 2840,
-      tokens_out: 1980,
-      markdown,
-      snapshot_id: latestSnapshot.id
-    });
   } catch (err) {
     console.error('Generate error:', err);
     res.status(500).json({ status: 'error', error: err.message });
@@ -794,7 +1067,103 @@ Include:
 });
 
 // Helper for high-fidelity markdown generation
+function buildLiveSystemDoc(snapshot, docType, audience) {
+  const safe = snapshot || emptyLiveSnapshot();
+  const modules = safe.modules || [];
+  const functions = safe.functions || [];
+  const stats = safe.stats || {};
+  const timestamp = safe.timestamp ? new Date(safe.timestamp).toLocaleString() : new Date().toLocaleString();
+  let doc = `# Zoho CRM Living System Documentation\n\n`;
+  doc += `> **Snapshot**: \`${safe.id || 'live'}\` · **Scanned**: ${timestamp} · **Audience**: *${String(audience || 'admin').toUpperCase()}*\n`;
+  doc += `> **Source**: Live Zoho CRM API v8 payload (\`${docType}\`).\n\n`;
+  doc += `## 1. Live inventory\n\n`;
+  doc += `| KPI | Count |\n| :--- | ---: |\n`;
+  doc += `| Modules | ${stats.total_modules || modules.length} |\n`;
+  doc += `| Fields | ${stats.total_fields || 0} |\n`;
+  doc += `| Workflow rules | ${stats.total_workflows || 0} |\n`;
+  doc += `| Blueprints | ${stats.total_blueprints || 0} |\n`;
+  doc += `| Functions | ${stats.total_functions || functions.length} |\n\n`;
+  if (!modules.length) {
+    doc += `No modules were included in this scan.\n\n`;
+  }
+  modules.forEach(m => {
+    const fields = m.fields || [];
+    const workflows = m.workflows || [];
+    const blueprints = m.blueprints || [];
+    doc += `### ${m.module} \`[${m.component_id || m.module}]\`\n\n`;
+    doc += `Fields ${fields.length} · Workflows ${workflows.length} · Blueprints ${blueprints.length}\n\n`;
+    if (fields.length) {
+      doc += `| Field | API name | Type | Required |\n| :--- | :--- | :--- | :--- |\n`;
+      fields.forEach(f => {
+        doc += `| ${f.label || f.api_name || ''} | \`${f.api_name || ''}\` | \`${f.data_type || ''}\` | ${f.required ? 'Required' : 'Optional'} |\n`;
+      });
+      doc += `\n`;
+    }
+    workflows.forEach(wf => {
+      const crit = wf.criteria || (wf.execute_when && wf.execute_when.details && wf.execute_when.details.criteria) || 'Always execute';
+      const trig = wf.trigger_type || (wf.execute_when && wf.execute_when.type) || '';
+      const critText = typeof crit === 'string' ? crit : JSON.stringify(crit);
+      doc += `- **${wf.name}** \`[${wf.id}]\` · trigger \`${trig}\` · criteria \`${critText}\`\n`;
+      (wf.actions || []).forEach(act => {
+        doc += `  - ${typeof act === 'string' ? act : (act.name || act.type || 'Action')}\n`;
+      });
+    });
+    blueprints.forEach(bp => {
+      doc += `- Blueprint **${bp.name || bp.id}** on \`${bp.field_name || ''}\`\n`;
+    });
+    doc += `\n`;
+  });
+  doc += `## 2. Functions returned by the API\n\n`;
+  if (!functions.length) doc += `No functions were returned.\n\n`;
+  functions.forEach(fn => {
+    doc += `- **${fn.name || fn.api_name}** \`[${fn.id || ''}]\` ${fn.description || ''}\n`;
+  });
+  doc += `\n> *Built from the CRM snapshot sent by the widget.*\n`;
+  return doc;
+}
+
+function answerFromLiveSnapshot(snapshot, question) {
+  const safe = snapshot || emptyLiveSnapshot();
+  const words = String(question || '').toLowerCase().split(/[^a-z0-9_]+/).filter(w => w.length > 3);
+  const workflows = [];
+  (safe.modules || []).forEach(m => {
+    (m.workflows || []).forEach(w => {
+      const moduleName = (typeof w.module === 'string' ? w.module : (w.module && w.module.api_name)) || m.module;
+      workflows.push({ ...w, moduleName });
+    });
+  });
+  const functions = safe.functions || [];
+  const matched = workflows.filter(w => {
+    const hay = `${w.name} ${w.moduleName} ${w.criteria || ''} ${(w.actions || []).join(' ')}`.toLowerCase();
+    return words.some(word => hay.includes(word));
+  });
+  const shown = (matched.length ? matched : workflows).slice(0, 12);
+  const stats = safe.stats || {};
+  let answer = `### Live CRM answer\n\n`;
+  answer += `This snapshot has **${stats.total_modules || (safe.modules || []).length} modules**, **${stats.total_fields || 0} fields**, **${stats.total_workflows || workflows.length} workflow rules**, **${stats.total_blueprints || 0} blueprints**, and **${functions.length} functions**.\n\n`;
+  if (!workflows.length && !(safe.modules || []).length) {
+    return answer + `No live CRM payload is loaded. Scan the organization inside Zoho CRM first.\n`;
+  }
+  if (shown.length) {
+    answer += `#### Workflow rules from the API\n\n`;
+    shown.forEach(w => {
+      answer += `- **${w.name}** \`[${w.id}]\` on \`${w.moduleName}\` · trigger \`${w.trigger_type || ''}\` · ${w.criteria || 'no criteria text'}\n`;
+    });
+    answer += `\n`;
+  }
+  if (functions.length) {
+    answer += `#### Functions\n\n`;
+    functions.slice(0, 10).forEach(fn => {
+      answer += `- **${fn.name || fn.api_name}** \`[${fn.id}]\` ${fn.description || ''}\n`;
+    });
+    answer += `\n`;
+  }
+  answer += `> Choose an AI provider in Settings for a fuller AI answer grounded on this same payload.\n`;
+  return answer;
+}
+
 function generateRichLivingDoc(snapshot, docType, audience) {
+  return buildLiveSystemDoc(snapshot, docType, audience);
   const timestamp = new Date(snapshot.timestamp).toLocaleString();
   const leadsMod = snapshot.modules.find(m => m.module === 'Leads');
   const dealsMod = snapshot.modules.find(m => m.module === 'Deals');
@@ -898,6 +1267,180 @@ stateDiagram-v2
   return doc;
 }
 
+function moduleNameOf(workflow) {
+  if (!workflow) return '';
+  if (typeof workflow.module === 'string') return workflow.module;
+  return (workflow.module && workflow.module.api_name) || '';
+}
+
+const DOC_INPUT_CHAR_BUDGET = 120000;
+
+function clipForModel(text, maxChars) {
+  const value = String(text || '');
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n[truncated to fit the model input limit]`;
+}
+
+const WORKFLOW_SYSTEM_PROMPT = `You are a senior Zoho CRM solution architect. You write operations documentation for workflow rules and the custom functions they call, for an administrator who has to maintain them.
+RULES:
+1. Output Markdown only. No HTML, no mermaid, and do not paste the function source back.
+2. Use only facts in the user message. When something is not stated, write "Not determined".
+3. The code block under each function is its real implementation. Trace it: the arguments and which record values the workflow passes in, records fetched (zoho.crm.getRecordById, searchRecords, getRelatedRecords), fields read, fields written (updateRecord, createRecord), external calls (invokeurl, sendmail, named connections), branches, loops, and the return value.
+4. If a function has no source, or its source ends with "[truncated to fit the model input limit]", say so in that function's section and do not guess the missing part.
+5. Write for the requested audience. Lead with the business outcome, then give exact CRM API names.
+6. End with: "> Reviewed by: ____________"`;
+
+function formatFunctionArgs(args) {
+  return (args || [])
+    .map(arg => (arg && typeof arg === 'object') ? `${arg.name || ''}${arg.type ? ` (${arg.type})` : ''}` : String(arg || ''))
+    .filter(Boolean)
+    .join(', ');
+}
+
+function codeFenceFor(fn, source) {
+  const lang = String(fn.language || fn.runtime || 'deluge').toLowerCase();
+  const tag = /deluge/.test(lang) ? 'deluge' : /node|javascript/.test(lang) ? 'javascript' : /python/.test(lang) ? 'python' : /java/.test(lang) ? 'java' : 'deluge';
+  const fence = source.includes('```') ? '~~~~' : '```';
+  return `${fence}${tag}\n${source}\n${fence}`;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Only fields the criteria, actions, or function source mention are sent, so the budget goes to code.
+function referencedFieldsText(workflows, snapshot) {
+  const names = new Set((workflows || []).map(moduleNameOf).filter(Boolean));
+  const haystack = (workflows || []).map(wf => [
+    typeof wf.criteria === 'string' ? wf.criteria : JSON.stringify(wf.criteria || ''),
+    (wf.actions || []).join('\n'),
+    (wf.function_code || []).map(fn => fn.source || '').join('\n')
+  ].join('\n')).join('\n');
+  const lines = [];
+  ((snapshot && snapshot.modules) || []).filter(mod => names.has(mod.module)).forEach(mod => {
+    const fields = mod.fields || [];
+    let used = fields.filter(f => f.api_name && new RegExp(`\\b${escapeRegExp(f.api_name)}\\b`).test(haystack));
+    const label = used.length ? 'referenced by this rule' : 'first fields of the module, none are referenced by name';
+    if (!used.length) used = fields.slice(0, 20);
+    used = used.slice(0, 60);
+    if (!used.length) return;
+    lines.push(`### ${mod.module} (${label})`);
+    used.forEach(f => lines.push(`- ${f.api_name}: ${f.label || f.api_name}, ${f.data_type || 'type not returned'}`));
+  });
+  return lines.join('\n');
+}
+
+function workflowPromptSection(wf, index, sourceLimit) {
+  const criteria = typeof wf.criteria === 'string' ? wf.criteria : JSON.stringify(wf.criteria || '');
+  const lines = [
+    `## Workflow rule ${index + 1}: ${wf.name}`,
+    `- Module: ${moduleNameOf(wf) || 'Not determined'}`,
+    `- Trigger: ${wf.trigger_type || (wf.execute_when && wf.execute_when.type) || 'Not determined'}`,
+    `- Status: ${wf.status || 'Not determined'}`,
+    `- Criteria: ${criteria || 'None (runs for every record matching the trigger)'}`,
+    `- Description: ${wf.description || 'None'}`,
+    `- Actions:`
+  ];
+  (wf.actions && wf.actions.length ? wf.actions : ['None returned']).forEach(act => lines.push(`  - ${act}`));
+  const fns = wf.function_code || [];
+  if (fns.length) {
+    lines.push('', '### Custom functions called by this rule');
+    fns.forEach(fn => {
+      lines.push('', `#### Function: ${fn.name || fn.api_name || 'Unnamed function'}`);
+      lines.push(`- API name: ${fn.api_name || 'Not returned'} | Language: ${fn.language || fn.runtime || 'Not returned'} | Runs: ${fn.timing || 'instant'}`);
+      const args = formatFunctionArgs(fn.arguments);
+      if (args) lines.push(`- Arguments: ${args}`);
+      if (fn.description) lines.push(`- Description: ${fn.description}`);
+      if (fn.source) {
+        const clipped = clipForModel(fn.source, sourceLimit);
+        const truncated = fn.source_truncated && !clipped.endsWith('[truncated to fit the model input limit]')
+          ? '\n[truncated to fit the model input limit]'
+          : '';
+        lines.push('- Source:', codeFenceFor(fn, clipped + truncated));
+      } else {
+        lines.push(`- Source: not retrieved. ${fn.error || fn.note || ''}`.trim());
+      }
+    });
+  }
+  return lines.join('\n');
+}
+
+function buildWorkflowPrompt(workflows, snapshot, audience) {
+  const rules = workflows || [];
+  const fieldsText = referencedFieldsText(rules, snapshot);
+  const task = `Audience: ${audience}
+
+# Task
+Write one document. For each workflow rule below, use these sections in this order:
+
+# <workflow name>
+## Purpose
+One paragraph: the business outcome of this rule.
+## When it runs
+Module, trigger, and whether the rule is active. Explain the criteria in plain language, then quote the exact criteria.
+## What it does
+A numbered list, one step per action, in the order Zoho runs them.
+## Custom function walkthrough
+For each function: what it is for, its arguments and where their values come from, a numbered walk through the code, and what it returns. Read this only from the code block.
+## Data touched
+A markdown table with columns: Module | Field or API name | Read or write | Where this happens.
+## Failure and re-entry
+Only risks visible in the rule or the code, such as an update that can fire this rule again, a missing null check, a hardcoded id, or a named connection the code depends on.
+## How to test
+Three to five checks an admin can run in Zoho CRM.`;
+  const sourceCount = rules.reduce((n, wf) => n + (wf.function_code || []).filter(fn => fn.source).length, 0);
+  const overhead = task.length + fieldsText.length + rules.map((wf, i) => workflowPromptSection(wf, i, 0)).join('\n\n').length;
+  const room = Math.max(4000, DOC_INPUT_CHAR_BUDGET - overhead - 2000);
+  const sourceLimit = Math.max(2000, Math.floor(room / Math.max(sourceCount, 1)));
+  const rawUser = [
+    task,
+    '# Workflow rules',
+    rules.map((wf, i) => workflowPromptSection(wf, i, sourceLimit)).join('\n\n'),
+    fieldsText ? `# Fields on the related modules\n${fieldsText}` : ''
+  ].filter(Boolean).join('\n\n');
+  // IDs, org IDs and tokens in criteria, actions or code are replaced here, so the preview shows exactly what is sent.
+  const scrubbed = ai.redactSecrets(rawUser);
+  const user = scrubbed.text;
+  const allFns = rules.flatMap(wf => wf.function_code || []);
+  return {
+    system: WORKFLOW_SYSTEM_PROMPT,
+    user,
+    stats: {
+      workflows: rules.length,
+      functions: allFns.length,
+      functions_with_source: allFns.filter(fn => fn.source).length,
+      characters: WORKFLOW_SYSTEM_PROMPT.length + user.length,
+      identifiers_removed: scrubbed.count
+    }
+  };
+}
+
+const IDENTIFIER_KEY = /^(id|org_?id|org|zgid|zsoid|owner|created_by|modified_by|.+_id)$/i;
+
+function stripIdentifiers(value) {
+  if (Array.isArray(value)) return value.map(stripIdentifiers);
+  if (!value || typeof value !== 'object') return value;
+  const out = {};
+  Object.keys(value).forEach(key => {
+    if (IDENTIFIER_KEY.test(key) || /[a-z]Id$/.test(key)) return;
+    out[key] = stripIdentifiers(value[key]);
+  });
+  return out;
+}
+
+function documentationPayload(markdown, extra) {
+  const trimmed = String(markdown || '').trim();
+  const wrapped = trimmed.match(/^```(?:markdown|md)?\n([\s\S]*)\n```$/);
+  const clean = wrapped ? wrapped[1].trim() : trimmed;
+  const pdf = markdownToPdf(clean);
+  return {
+    markdown: clean,
+    pdf_base64: pdf.toString('base64'),
+    pdf_bytes: pdf.length,
+    ...extra
+  };
+}
+
 // Dedicated Workflow Automation Architecture & Specification Generator
 function generateWorkflowSpecDoc(selectedWorkflows, snapshot, audience) {
   const timestamp = new Date().toLocaleString();
@@ -971,17 +1514,26 @@ flowchart TD
     doc += `\n`;
   });
 
-  doc += `## 4. Webhook Payloads, Deluge Scripts & External Integrations \`[Component: wf_integrations]\`\n\n`;
-  doc += `Any webhook calls and custom functions invoked by the selected workflows utilize Zoho Named Connections (\`docsagent_connection\`).\n\n`;
-  doc += `- **Zero Hardcoded API Keys**: All authentication is delegated to secure OAuth token governance.\n`;
-  doc += `- **Timeout Handling**: Webhooks and third-party REST endpoints configured with retry policies.\n\n`;
+  doc += `## 4. Custom functions retrieved with each rule \`[Component: wf_integrations]\`\n\n`;
+  doc += `Function source is downloaded with \`GET /crm/v8/settings/functions/{id}/code\` and sent to the model with the workflow rule. This local draft lists what was retrieved. Choose an AI provider in Settings for a write-up of that source.\n\n`;
+  selectedWorkflows.forEach(wf => {
+    const functions = wf.function_code || [];
+    doc += `### ${wf.name}\n\n`;
+    if (!functions.length) {
+      doc += `No custom function action was found on this workflow rule.\n\n`;
+      return;
+    }
+    functions.forEach(fn => {
+      doc += `- **${fn.name || fn.api_name || 'Function'}** \`${fn.id || ''}\` · ${fn.language || 'language not returned'} · ${fn.runtime || 'runtime not returned'} · ${fn.timing || 'instant'}\n`;
+      if (fn.error) doc += `  - Source was not retrieved: ${fn.error}\n`;
+      else if (fn.source) doc += `  - Source retrieved (${fn.source.length} characters)${fn.source_truncated ? ', truncated for the prompt' : ''}.\n`;
+      else doc += `  - Source was not retrieved. ${fn.note || ''}\n`;
+    });
+    doc += `\n`;
+  });
 
-  doc += `## 5. Failure Modes, Race Conditions & Loop Prevention \`[Component: wf_safety]\`\n\n`;
-  doc += `| Risk Factor | Potential Impact | Mitigation in Configuration |\n`;
-  doc += `| :--- | :--- | :--- |\n`;
-  doc += `| **Recursive Triggers** | Infinite webhook loop | Ensure workflow does not re-trigger edit events on same field |\n`;
-  doc += `| **Missing Required Fields** | Action failure | Criteria includes \`is not empty\` checks before execution |\n`;
-  doc += `| **Third-Party Outage** | Delayed sync | Asynchronous Deluge task queuing for API operations |\n\n`;
+  doc += `## 5. Failure modes visible from the rule \`[Component: wf_safety]\`\n\n`;
+  doc += `Review the retrieved function source for record updates that can re-fire this workflow, empty required fields, and calls that depend on a named connection.\n\n`;
 
   doc += `> *Targeted Workflow Documentation · Living Documentation Agent · Reviewed by: ________________________*`;
 
@@ -989,10 +1541,46 @@ flowchart TD
 }
 
 // 5. Check Drift (Key Differentiator)
+function stampLiveHashes(snapshot) {
+  const safe = snapshot && Array.isArray(snapshot.modules) ? snapshot : emptyLiveSnapshot();
+  safe.modules.forEach(mod => {
+    (mod.fields || []).forEach(f => {
+      if (!f.hash) f.hash = hashComponent({ api: f.api_name, type: f.data_type, req: f.required });
+    });
+    (mod.workflows || []).forEach(w => {
+      if (!w.hash) w.hash = hashComponent({ id: w.id, name: w.name, status: w.status, crit: w.criteria, act: w.actions });
+    });
+    (mod.blueprints || []).forEach(b => {
+      if (!b.hash) b.hash = hashComponent({ id: b.id, name: b.name, field: b.field_name });
+    });
+    mod.fields = mod.fields || [];
+  });
+  return safe;
+}
+
 expressApp.post('/api/drift', (req, res) => {
   try {
-    const baselineSnapshot = dataStore.snapshots.find(s => s.id === dataStore.activeBaselineId) || dataStore.snapshots[0];
-    const currentSnapshot = buildSnapshot();
+    const body = req.body || {};
+    let baselineSnapshot;
+    let currentSnapshot;
+    if (body.current && Array.isArray(body.current.modules)) {
+      baselineSnapshot = stampLiveHashes(JSON.parse(JSON.stringify(body.baseline && body.baseline.modules ? body.baseline : body.current)));
+      currentSnapshot = stampLiveHashes(JSON.parse(JSON.stringify(body.current)));
+    } else if (liveCache.snapshot) {
+      baselineSnapshot = stampLiveHashes(JSON.parse(JSON.stringify(liveCache.baseline || liveCache.snapshot)));
+      currentSnapshot = stampLiveHashes(JSON.parse(JSON.stringify(liveCache.snapshot)));
+    } else {
+      return res.json({
+        status: 'success',
+        drift: {
+          is_drift_detected: false,
+          total_changes: 0,
+          changes: [],
+          affected_sections: [],
+          message: 'No live snapshots to compare yet.'
+        }
+      });
+    }
 
     const changes = [];
     const affectedSections = [];
@@ -1129,7 +1717,7 @@ expressApp.post('/api/drift', (req, res) => {
 // 6. Targeted Regeneration (Regenerate Affected Sections Only)
 expressApp.post('/api/regenerate', (req, res) => {
   try {
-    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const latestSnapshot = (req.body && req.body.snapshot) || liveCache.snapshot || emptyLiveSnapshot();
     // Set this latest snapshot as the new documented baseline
     dataStore.activeBaselineId = latestSnapshot.id;
 
@@ -1151,17 +1739,18 @@ expressApp.post('/api/regenerate', (req, res) => {
 });
 
 // 7. Ask AI Assistant (Grounded Q&A)
-expressApp.post('/api/ask', async (req, res) => {
+expressApp.post('/api/ask', sameOriginOnly, async (req, res) => {
   try {
-    const { question } = req.body;
+    const { question, snapshot: incomingSnapshot } = req.body;
     if (!question || !question.trim()) {
       return res.status(400).json({ status: 'error', error: 'Question is required' });
     }
 
-    const latestSnapshot = dataStore.snapshots[dataStore.snapshots.length - 1] || buildSnapshot();
+    const latestSnapshot = (incomingSnapshot && (incomingSnapshot.modules || incomingSnapshot.stats))
+      ? incomingSnapshot
+      : (liveCache.snapshot || emptyLiveSnapshot());
 
-    // Call Claude if available
-    if (appSettings.claudeApiKey && appSettings.claudeApiKey.startsWith('sk-ant-')) {
+    if (aiConfigured()) {
       try {
         const systemPrompt = `You are the Zoho Living Documentation Assistant. You answer questions about how this specific Zoho CRM system is configured and automated.
 STRICT RULES:
@@ -1170,82 +1759,21 @@ STRICT RULES:
 3. Provide step-by-step logic flows when describing automations.
 4. Format answers in clear, readable Markdown with bullet points or tables.`;
 
-        const claudeResp = await fetch(appSettings.claudeApiUrl, {
-          method: 'POST',
-          headers: {
-            'x-api-key': appSettings.claudeApiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: appSettings.claudeModel,
-            max_tokens: 1500,
-            temperature: 0.1,
-            system: systemPrompt,
-            messages: [
-              {
-                role: 'user',
-                content: `Active CRM Configuration Snapshot:\n${JSON.stringify(latestSnapshot, null, 2)}\n\nQuestion: ${question}`
-              }
-            ]
-          })
+        const result = await ai.callAi(aiConfig(), {
+          system: systemPrompt,
+          user: `Active CRM Configuration Snapshot:\n${JSON.stringify(stripIdentifiers(latestSnapshot), null, 2)}\n\nQuestion: ${question}`,
+          maxTokens: 1500,
+          temperature: 0.1
         });
-
-        const claudeData = await claudeResp.json();
-        if (claudeData.content && claudeData.content.length > 0) {
-          return res.json({
-            status: 'success',
-            answer: claudeData.content[0].text
-          });
+        if (String(result.text || '').trim()) {
+          return res.json({ status: 'success', answer: result.text });
         }
-      } catch (claudeErr) {
-        console.warn('[Claude Ask AI Failed, using intelligent local solver]:', claudeErr.message);
+      } catch (aiErr) {
+        console.warn('[AI ask failed, using local answer]:', aiErr.message);
       }
     }
 
-    // High-Fidelity Contextual Offline Answers
-    const qLower = question.toLowerCase();
-    let answer = '';
-
-    if (qLower.includes('lead') && (qLower.includes('deal') || qLower.includes('qualif') || qLower.includes('become'))) {
-      answer = `### Lead to Deal Lifecycle Flow\n\n` +
-        `Based on the active configuration in **\`[Module: Leads]\`** and **\`[Module: Deals]\`**:\n\n` +
-        `1. **Trigger Condition**: When \`Lead_Status\` is updated to \`'Qualified'\` \`[Field: Leads.Lead_Status]\`.\n` +
-        `2. **Workflow Automation \`[Workflow: wf_Lead_Auto_Convert]\` Execution**:\n` +
-        `   - Automatically converts the Lead into an **Account** and **Contact**.\n` +
-        `   - Spawns a new **Deal** in the \`'Qualification'\` stage with pipeline set to \`'Standard Sales'\`.\n` +
-        `   - Deluge function **\`[Function: fn_enrich_lead_data]\`** verifies firmographic enrichment before conversion.\n` +
-        `3. **Blueprint Activation**: The deal enters **\`[Blueprint: Enterprise Sales Cycle Blueprint]\`** requiring a mandatory Discovery Call before advancing.\n\n` +
-        `> *Source Components: \`[mod_Leads]\`, \`[wf_Lead_Auto_Convert]\`, \`[bp_dl_01]\`*`;
-    } else if (qLower.includes('function') || qLower.includes('webhook') || qLower.includes('stripe') || qLower.includes('api') || qLower.includes('integration')) {
-      answer = `### Integrations & Custom Functions Inventory\n\n` +
-        `The current snapshot records **${latestSnapshot.functions.length} Custom Functions** and **2 Webhook Triggers**:\n\n` +
-        `- **\`[Function: fn_sync_stripe_customer]\`**:\n` +
-        `  - *Trigger*: Invoked by \`[wf_Deal_Closed_Won_Sync]\` when Deal stage becomes \`Closed Won\`.\n` +
-        `  - *Operation*: Creates or updates customer in Stripe Billing API via OAuth connection.\n` +
-        `- **\`[Function: fn_enrich_lead_data]\`**:\n` +
-        `  - *Trigger*: Inbound Lead creation webhook \`[wf_Lead_Auto_Enrichment]\`.\n` +
-        `  - *Operation*: Queries Clearbit API for revenue & company size metrics.\n` +
-        `- **\`[Webhook: Slack #enterprise-deals]\`**:\n` +
-        `  - *Trigger*: \`[wf_High_Value_Deal_Alert]\` when Deal \`Amount >= $50,000\`.\n\n` +
-        `> *Security Notice: All API tokens are stored in Zoho Named Connections and never hardcoded in scripts.*`;
-    } else if (qLower.includes('blueprint') || qLower.includes('stage') || qLower.includes('transition')) {
-      answer = `### Blueprint & Stage-Gate Governance\n\n` +
-        `Active Blueprint: **\`[Blueprint: Enterprise Sales Cycle Blueprint]\`** on module **\`[Module: Deals]\`**:\n\n` +
-        `- **Qualification** ➔ *Complete Discovery* ➔ **Needs Analysis**\n` +
-        `- **Needs Analysis** ➔ *Deliver Pitch* ➔ **Value Proposition**\n` +
-        `- **Value Proposition** ➔ *Send Formal Proposal* ➔ **Proposal / Price Quote**\n` +
-        `- **Proposal / Price Quote** ➔ *Executive Approval* ➔ **Negotiation / Review** *(Mandatory validation if discount > 20%)*\n` +
-        `- **Negotiation / Review** ➔ *Sign Contract* ➔ **Closed Won**\n\n` +
-        `> *Source: \`[Component: bp_dl_01]\`*`;
-    } else {
-      answer = `### Living Documentation Query Result\n\n` +
-        `Based on active snapshot **\`[${latestSnapshot.id}]\`** containing **${latestSnapshot.stats.total_modules} modules**, **${latestSnapshot.stats.total_fields} fields**, and **${latestSnapshot.stats.total_workflows} workflows**:\n\n` +
-        `- Core entities configured: \`[mod_Leads]\`, \`[mod_Deals]\`, \`[mod_Accounts]\`, \`[mod_Contacts]\`.\n` +
-        `- The system enforces automated lead conversion, high-value deal alerts, and closed-won billing synchronization.\n` +
-        `- Ask about specific fields, stage transitions, or custom function logic to inspect step-by-step details.\n\n` +
-        `> *Verified against active metadata baseline.*`;
-    }
+    const answer = answerFromLiveSnapshot(latestSnapshot, question);
 
     res.json({
       status: 'success',
@@ -1258,15 +1786,14 @@ STRICT RULES:
 });
 
 // 8. Function Builder (AI Deluge Code Generator & Safety Analyzer)
-expressApp.post('/api/function/generate', async (req, res) => {
+expressApp.post('/api/function/generate', sameOriginOnly, async (req, res) => {
   try {
     const { prompt, module = 'Deals', trigger = 'on_edit' } = req.body;
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ status: 'error', error: 'Prompt is required' });
     }
 
-    // Call Claude if available
-    if (appSettings.claudeApiKey && appSettings.claudeApiKey.startsWith('sk-ant-')) {
+    if (aiConfigured()) {
       try {
         const systemPrompt = `You are an expert Zoho CRM Deluge Developer & Architect.
 Generate clean, production-grade, and safe Zoho Deluge script.
@@ -1287,38 +1814,19 @@ Output strictly JSON matching this schema:
   "documentation_markdown": "string (Markdown documentation of the function)"
 }`;
 
-        const claudeResp = await fetch(appSettings.claudeApiUrl, {
-          method: 'POST',
-          headers: {
-            'x-api-key': appSettings.claudeApiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: appSettings.claudeModel,
-            max_tokens: 3000,
-            temperature: 0.1,
-            system: systemPrompt,
-            messages: [
-              {
-                role: 'user',
-                content: `Module: ${module}\nTrigger: ${trigger}\nRequirement: ${prompt}`
-              }
-            ]
-          })
+        const result = await ai.callAi(aiConfig(), {
+          system: systemPrompt,
+          user: `Module: ${module}\nTrigger: ${trigger}\nRequirement: ${prompt}`,
+          maxTokens: 3000,
+          temperature: 0.1
         });
-
-        const claudeData = await claudeResp.json();
-        if (claudeData.content && claudeData.content.length > 0) {
-          const raw = claudeData.content[0].text;
+        if (String(result.text || '').trim()) {
+          const raw = result.text.trim();
           const parsed = JSON.parse(raw.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
-          return res.json({
-            status: 'success',
-            result: parsed
-          });
+          return res.json({ status: 'success', result: parsed });
         }
-      } catch (claudeErr) {
-        console.warn('[Claude Function Builder fallback to smart generator]:', claudeErr.message);
+      } catch (aiErr) {
+        console.warn('[AI function builder failed, using local generator]:', aiErr.message);
       }
     }
 
@@ -1422,6 +1930,162 @@ expressApp.post('/api/function/deploy', (req, res) => {
     function_id: newFn.id,
     new_snapshot_id: newSnapshot.id
   });
+});
+
+// Function review: improve a masked Deluge function, and keep backups for rollback.
+const FUNCTION_IMPROVE_SYSTEM_PROMPT = `You are a senior Zoho CRM Deluge developer. You improve one Deluge function.
+
+Rules:
+1. Return the complete function. The first line must be the declaration exactly as given: same return type, category, name and arguments. Zoho rejects the update if the name or category changes. Put comments inside the body, never above the declaration.
+2. Values like {{TOKEN_1}}, {{SECRET_2}}, {{ORG_ID}}, {{ID_3}}, {{CUSTOM_1}} and {{SRV_ID_4}} are masked secrets or IDs. Copy each one exactly, character for character, wherever the value is still needed. Never invent placeholders and never write real-looking keys. If you replace a credential with a Zoho Connection, drop its placeholder and say so in the summary.
+3. Keep the behaviour the same. Only fix the listed issues and obvious bugs. Do not add integrations, modules, fields or features.
+4. Typical fixes: wrap API calls in try/catch and log with info in the catch; check invokeurl responses (detailed:true and responseCode, or check the map); null checks with isNull(), isEmpty() or containKey() before .get(); move CRM calls out of for each loops; descriptive variable names; a short header comment; remove unused variables and debug info; return a value when the declaration has a return type.
+5. Write valid Deluge only. Deluge has no let, const, var, function keyword, arrow functions, template strings, while loops or ?? operator.
+
+Output format, exactly:
+SUMMARY:
+- one short line per change
+CODE:
+\`\`\`deluge
+<the complete function>
+\`\`\``;
+
+const UNMASKED_SECRET_PATTERNS = [
+  /Zoho-oauthtoken\s+[A-Za-z0-9._-]{16,}/i,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/,
+  /\b1000\.[a-f0-9]{32}\.[a-f0-9]{32}\b/i,
+  /["'](?:client_secret|refresh_token|access_token|api_key|apikey|password)["']\s*[:,]\s*["'](?!\{\{)[^"'\n]{4,}["']/i,
+  /[?&](?:client_secret|refresh_token|access_token|api_key|apikey|authtoken|password)=(?!\{\{)[^&"'\s]{4,}/i
+];
+
+function findUnmaskedSecret(text) {
+  return UNMASKED_SECRET_PATTERNS.some(re => re.test(String(text || '')));
+}
+
+function buildImprovePrompt(fn, source, issues, placeholders) {
+  const issueLines = (Array.isArray(issues) ? issues : []).slice(0, 80).map(i =>
+    `- [${i.severity}] line ${i.line}, rule ${i.rule} (${i.title}): ${i.message} Fix: ${i.fix}`
+  );
+  return [
+    `Function: ${fn.name || fn.api_name || 'unnamed'}${fn.api_name && fn.api_name !== fn.name ? ` (api name ${fn.api_name})` : ''}`,
+    fn.signature ? `Declaration (keep exactly): ${fn.signature}` : '',
+    placeholders && placeholders.length ? `Masked values to keep verbatim: ${placeholders.join(', ')}` : 'No masked values.',
+    '',
+    'Issues found by the local checker:',
+    issueLines.length ? issueLines.join('\n') : '- none',
+    '',
+    'Function (secrets already masked):',
+    '```deluge',
+    source,
+    '```'
+  ].filter(line => line !== null).join('\n');
+}
+
+function parseImproveResponse(text) {
+  const codeAt = text.search(/^\s*CODE:\s*$/m);
+  const codePart = codeAt >= 0 ? text.slice(codeAt) : text;
+  const fence = /(```|~~~)[\w-]*[ \t]*\n([\s\S]*?)\n?\1/.exec(codePart);
+  const code = fence ? fence[2].replace(/\s+$/, '') : '';
+  const summaryEnd = codeAt >= 0 ? codeAt : (fence ? text.indexOf(fence[0]) : text.length);
+  const summary = text.slice(0, summaryEnd)
+    .replace(/^\s*SUMMARY:\s*/m, '')
+    .split('\n')
+    .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
+    .filter(Boolean);
+  return { code, summary };
+}
+
+expressApp.post('/api/function/improve', sameOriginOnly, async (req, res) => {
+  try {
+    const { function: fn = {}, masked_source: source, issues = [], placeholders = [] } = req.body || {};
+    if (!source || !String(source).trim()) {
+      return res.status(400).json({ status: 'error', error: 'masked_source is required' });
+    }
+    if (findUnmaskedSecret(source)) {
+      return res.status(400).json({ status: 'error', error: 'The code still contains what looks like a credential. Mask it in the widget before sending.' });
+    }
+    if (!aiConfigured()) return aiNotConfiguredResponse(res, 'improve a function');
+
+    const result = await ai.callAi(aiConfig(), {
+      system: FUNCTION_IMPROVE_SYSTEM_PROMPT,
+      user: buildImprovePrompt(fn, String(source), issues, placeholders),
+      maxTokens: 8000,
+      temperature: 0.1,
+      restore: true
+    });
+    const parsed = parseImproveResponse(result.text || '');
+    if (!parsed.code.trim()) throw new Error('The model did not return a code block.');
+    res.json({
+      status: 'success',
+      mode: 'model',
+      model: result.model,
+      ai_label: result.label,
+      generated_by: aiDisplayName(result),
+      code: parsed.code,
+      summary: parsed.summary,
+      tokens_in: result.tokens_in,
+      tokens_out: result.tokens_out
+    });
+  } catch (err) {
+    console.error('Function improve error:', err.message);
+    res.status(502).json({ status: 'error', error: err.message });
+  }
+});
+
+// Backups hold real, unmasked code, so they are same-origin only.
+const functionBackupDir = path.join(__dirname, 'data', 'function-backups');
+const MAX_BACKUPS_PER_FUNCTION = 30;
+
+function functionBackupFile(functionId) {
+  return path.join(functionBackupDir, `${String(functionId).replace(/[^\w.-]/g, '_')}.json`);
+}
+
+function readFunctionBackups(functionId) {
+  try {
+    return JSON.parse(fs.readFileSync(functionBackupFile(functionId), 'utf8'));
+  } catch (_) {
+    return [];
+  }
+}
+
+expressApp.get('/api/function/backups', sameOriginOnly, (req, res) => {
+  const functionId = req.query.function_id;
+  if (!functionId) return res.status(400).json({ status: 'error', error: 'function_id is required' });
+  res.json({ status: 'success', backups: readFunctionBackups(functionId) });
+});
+
+expressApp.post('/api/function/backups', sameOriginOnly, (req, res) => {
+  try {
+    const { function_id: functionId, api_name: apiName, name, source, reason, changelog } = req.body || {};
+    if (!functionId || typeof source !== 'string' || !source.trim()) {
+      return res.status(400).json({ status: 'error', error: 'function_id and source are required' });
+    }
+    const entry = {
+      id: `bk_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      function_id: String(functionId),
+      api_name: apiName || '',
+      name: name || '',
+      source,
+      reason: reason || 'Before apply',
+      changelog: changelog || '',
+      lines: source.split('\n').length,
+      at: new Date().toISOString()
+    };
+    const list = [entry, ...readFunctionBackups(functionId)].slice(0, MAX_BACKUPS_PER_FUNCTION);
+    fs.mkdirSync(functionBackupDir, { recursive: true });
+    fs.writeFileSync(functionBackupFile(functionId), JSON.stringify(list, null, 2));
+    res.json({ status: 'success', backup: entry });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+expressApp.post('/api/pdf', (req, res) => {
+  try {
+    res.json({ status: 'success', ...documentationPayload(req.body.markdown || '', {}) });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
 });
 
 // 10. WorkDrive Export

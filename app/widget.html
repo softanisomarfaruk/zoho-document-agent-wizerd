@@ -129,8 +129,7 @@
               </label>
               <label class="field">
                 <span>Model</span>
-                <input type="text" id="setupAiModel" list="setupAiModelList" spellcheck="false" autocomplete="off" />
-                <datalist id="setupAiModelList"></datalist>
+                <select id="setupAiModel"></select>
               </label>
             </div>
             <label class="field" id="setupAiUrlField">
@@ -142,6 +141,11 @@
               <span>Claude API key</span>
               <input type="password" id="setupAiClaudeKey" autocomplete="new-password" spellcheck="false" />
               <small id="setupAiClaudeHint">Saved on Living_Docs_Settings.</small>
+            </label>
+            <label class="field" id="setupAiWorkspaceField">
+              <span>Claude workspace ID <span class="muted">optional</span></span>
+              <input type="text" id="setupAiWorkspace" spellcheck="false" autocomplete="off" placeholder="wrkspc_…" />
+              <small>Only needed when Anthropic says the key is not scoped to a workspace. Find it in the Anthropic console under Settings, Workspaces.</small>
             </label>
             <label class="field" id="setupAiCursorField" hidden>
               <span>Cursor API key</span>
@@ -164,6 +168,7 @@
       <div class="setup-actions">
         <button class="btn btn-ghost" id="btnSetupRetry">Check again</button>
         <div class="row gap-8">
+          <button class="btn btn-secondary" id="btnSetupEdit" type="button" hidden>Edit settings</button>
           <button class="btn btn-ghost" id="btnSetupBack" type="button" hidden>Back</button>
           <button class="btn btn-primary" id="btnSetupNext" type="button" hidden>Next</button>
           <button class="btn btn-primary" id="btnSetupInstall" type="button" hidden>Submit</button>
@@ -252,7 +257,7 @@
       <div class="panel-head">
         <div>
           <h2>Select workflows to document</h2>
-          <p class="muted">Pick one rule or several. They go into one document.</p>
+          <p class="muted">Pick up to 3 rules at a time. Each rule gets its own document, and they are written in parallel.</p>
         </div>
         <span class="pill pill-blue" id="selectedCountPill">0 selected</span>
       </div>
@@ -292,7 +297,10 @@
 
       <div class="step-footer">
         <button class="btn btn-ghost" data-goto="1">Back</button>
-        <button class="btn btn-primary" id="btnToReview" disabled>Review selected</button>
+        <div class="row gap-8">
+          <button class="btn btn-secondary" id="btnModuleDoc" type="button" hidden title="Documents every workflow rule of this module into one master document">Generate module document</button>
+          <button class="btn btn-primary" id="btnToReview" disabled>Review selected</button>
+        </div>
       </div>
     </div>
 
@@ -357,6 +365,7 @@
         </div>
       </div>
 
+      <div class="review-tabs" id="docTabs"></div>
       <div class="notice warning" id="docNotice" hidden></div>
       <article class="card doc-view" id="docView"></article>
 
@@ -416,13 +425,18 @@
       </label>
       <label class="field">
         <span>Model</span>
-        <input type="text" id="settingsAiModel" list="settingsAiModelList" spellcheck="false" autocomplete="off" />
-        <datalist id="settingsAiModelList"></datalist>
+        <select id="settingsAiModel"></select>
+        <small>Filled from the provider once the API key works.</small>
       </label>
       <label class="field">
         <span>API key</span>
         <input type="password" id="settingsAiKey" autocomplete="new-password" spellcheck="false" />
         <small id="settingsAiKeyHint">Saved on the Living_Docs_Settings record. It is not shown again after you save.</small>
+      </label>
+      <label class="field" id="settingsAiWorkspaceField">
+        <span>Claude workspace ID <span class="muted">optional</span></span>
+        <input type="text" id="settingsAiWorkspace" spellcheck="false" autocomplete="off" placeholder="wrkspc_…" />
+        <small>Only needed when the key is not scoped to a workspace (Anthropic console, Settings, Workspaces).</small>
       </label>
       <div class="row gap-8 ai-test-row">
         <button class="btn btn-secondary btn-sm" id="btnTestAi" type="button">Test connection</button>
@@ -440,6 +454,14 @@
         <option value="developer">Developer</option>
         <option value="client">Business owner</option>
       </select>
+    </label>
+    <label class="field">
+      <span>Document detail</span>
+      <select id="settingsDocDetail">
+        <option value="quick">Quick: short document, fastest reply</option>
+        <option value="detailed">Detailed: full walkthrough, slower</option>
+      </select>
+      <small>Response time mostly depends on how long the document is. For Claude, Haiku is the fastest model.</small>
     </label>
     <p class="muted small" id="settingsRecordNote"></p>
   </div>

@@ -15,8 +15,9 @@
       workdriveConnection: 'workdrive_connection'
     },
     audience: localStorage.getItem('livingdocs.audience') || 'admin',
+    docDetail: localStorage.getItem('livingdocs.detail') === 'detailed' ? 'detailed' : 'quick',
     hasApiKey: false,
-    ai: { provider: '', label: '', apiUrl: '', model: '', hasApiKey: false, keyHint: '', configured: false },
+    ai: { provider: '', label: '', apiUrl: '', model: '', workspaceId: '', hasApiKey: false, keyHint: '', configured: false },
     aiKeys: { anthropic: '', cursor: '' },
     aiProviders: {},
     docLog: null,
@@ -34,9 +35,15 @@
     reviewDocMode: 'details',
     moduleFields: {},
     fnReviews: {},
-    generated: null,
-    saved: null
+    prompts: {},
+    docs: [],
+    // Set while a whole module is documented into one "<Module>_Master_Document" record.
+    moduleRun: null,
+    activeDocId: null
   };
+
+  // Rules documented per run. Each gets its own prompt, AI call, PDF and CRM record, written in parallel.
+  const MAX_BATCH = 3;
 
   const dom = {};
 
@@ -369,6 +376,7 @@
     const cursor = String(record.Cursor_API_Key || '').trim();
     if (claude) state.aiKeys.anthropic = claude;
     if (cursor) state.aiKeys.cursor = cursor;
+    state.ai.workspaceId = String(record.Claude_Workspace_Id || '').trim();
     const [provider, label] = String(record.AI_Provider || '').split('|');
     if (provider) {
       state.ai.provider = provider;
@@ -459,7 +467,8 @@
       AI_Model: state.ai.model || '',
       AI_API_URL: state.ai.apiUrl || '',
       Claude_API_Key: state.aiKeys.anthropic || '',
-      Cursor_API_Key: state.aiKeys.cursor || ''
+      Cursor_API_Key: state.aiKeys.cursor || '',
+      Claude_Workspace_Id: state.ai.workspaceId || ''
     };
     if (fields.scheduleFrequency) APIData.Schedule_Frequency = fields.scheduleFrequency;
     if (state.audience) APIData.Audience = state.audience;
@@ -476,6 +485,13 @@
         APIData: data
       });
     };
+
+    // Zoho can drop values for fields the module does not have yet, so older installs get the new fields before the first write.
+    if (!state.settingsFieldsEnsured && state.ai.workspaceId && canUseZohoConnection()) {
+      state.settingsFieldsEnsured = true;
+      const spec = LIVING_DOCS_MODULES.find(m => m.key === 'settings');
+      await ensureModuleFields(state.settings.docsAgentConnection || 'docsagent_connection', spec, (msg, type) => console.log('[Settings fields]', type, msg)).catch(() => null);
+    }
 
     // A failed write usually means the module is missing a field (older install), so add the fields and retry once.
     const attempt = async (data, isUpdate) => {
@@ -544,6 +560,7 @@
         { label: 'AI API URL', type: 'text', length: 255 },
         { label: 'Claude API Key', type: 'textarea', length: 2000, textarea: 'small' },
         { label: 'Cursor API Key', type: 'textarea', length: 2000, textarea: 'small' },
+        { label: 'Claude Workspace Id', type: 'text', length: 120 },
         { label: 'Audience', type: 'text', length: 40 }
       ]
     },
@@ -1179,21 +1196,15 @@
     setTimeout(() => URL.revokeObjectURL(link.href), 1500);
   }
 
-  function documentTitle() {
-    const rules = state.reviewWorkflows;
-    return rules.length === 1 ? rules[0].name : `${rules.length} workflow rules`;
-  }
-
-  function pdfDocumentHtml() {
-    const g = state.generated;
-    const rules = state.reviewWorkflows;
-    const modules = [...new Set(rules.map(wf => moduleLabel(wf.module)).filter(Boolean))].join(', ');
+  function pdfDocumentHtml(doc) {
+    const g = doc.generated;
     return `
       <header class="pdf-cover">
         <div class="pdf-brand">Living Docs · Zoho CRM workflow documentation</div>
-        <h1 class="pdf-title">${escapeHtml(documentTitle())}</h1>
+        <h1 class="pdf-title">${escapeHtml(doc.wf.name)}</h1>
         <div class="pdf-meta">
-          <span><b>Module</b> ${escapeHtml(modules || 'CRM')}</span>
+          <span><b>Module</b> ${escapeHtml(moduleLabel(doc.wf.module) || 'CRM')}</span>
+          ${g.version ? `<span><b>Version</b> v${escapeHtml(g.version)}</span>` : ''}
           <span><b>Date</b> ${escapeHtml(formatDate(g.at))}</span>
           <span><b>Written by</b> ${escapeHtml(g.generatedBy || aiName())}</span>
         </div>
@@ -1201,20 +1212,72 @@
       <article class="doc-view pdf-body">${renderMarkdown(g.markdown)}</article>`;
   }
 
-  async function renderPdfBytes() {
-    if (typeof window.html2pdf !== 'function') throw new Error('The PDF renderer did not load. Reload the widget and try again.');
+  function renderPdfBytes(doc) {
+    return renderSectionsPdf([pdfDocumentHtml(doc)], doc.generated.fileName, doc.wf.name);
+  }
+
+  // Browsers cap a canvas at about 32k pixels, so a continuous document is cut into as few
+  // render passes as fit under that height. Each pass starts on a new page.
+  const PDF_MAX_CANVAS_PX = 28000;
+
+  function pdfSheet(html, compact) {
     const sheet = document.createElement('div');
-    sheet.className = 'pdf-sheet';
-    sheet.innerHTML = pdfDocumentHtml();
-    const title = documentTitle();
-    const pdf = await window.html2pdf().set({
-      margin: [12, 12, 16, 12],
-      filename: state.generated.fileName,
+    sheet.className = compact ? 'pdf-sheet compact' : 'pdf-sheet';
+    sheet.innerHTML = html;
+    return sheet;
+  }
+
+  function continuousChunks(sections, maxCssHeight) {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;';
+    document.body.appendChild(host);
+    const chunks = [];
+    try {
+      let current = [];
+      let height = 0;
+      sections.forEach((html) => {
+        const sheet = pdfSheet(html, true);
+        host.appendChild(sheet);
+        const h = sheet.scrollHeight;
+        host.removeChild(sheet);
+        if (current.length && height + h > maxCssHeight) {
+          chunks.push(current.join(''));
+          current = [];
+          height = 0;
+        }
+        current.push(html);
+        height += h;
+      });
+      if (current.length) chunks.push(current.join(''));
+    } finally {
+      host.remove();
+    }
+    return chunks;
+  }
+
+  // Separate sections start on a new page. With continuous, sections flow one after another and only
+  // the workflow headings separate them (used for module master documents).
+  async function renderSectionsPdf(sections, fileName, title, options = {}) {
+    if (typeof window.html2pdf !== 'function') throw new Error('The PDF renderer did not load. Reload the widget and try again.');
+    const compact = Boolean(options.continuous);
+    const scale = compact ? 1.25 : (sections.length > 12 ? 1.5 : 2);
+    const parts = compact ? continuousChunks(sections, PDF_MAX_CANVAS_PX / scale) : sections;
+    const sheetFor = html => pdfSheet(html, compact);
+    const margin = compact ? [8, 10, 10, 10] : [12, 12, 16, 12];
+    let worker = window.html2pdf().set({
+      margin,
+      filename: fileName,
       image: { type: 'jpeg', quality: 0.95 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
+      html2canvas: { scale, useCORS: true, backgroundColor: '#ffffff', logging: false },
       jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover'] }
-    }).from(sheet).toPdf().get('pdf');
+      pagebreak: compact
+        ? { mode: ['css'] }
+        : { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover'] }
+    }).from(sheetFor(parts[0])).toPdf();
+    parts.slice(1).forEach((html) => {
+      worker = worker.get('pdf').then(p => { p.addPage(); }).from(sheetFor(html)).toContainer().toCanvas().toPdf();
+    });
+    const pdf = await worker.get('pdf');
     const total = pdf.internal.getNumberOfPages();
     const width = pdf.internal.pageSize.getWidth();
     const height = pdf.internal.pageSize.getHeight();
@@ -1362,7 +1425,7 @@
       'screenBoot', 'screenSetup', 'screenFlow', 'setupTitle', 'setupSubtitle', 'setupChecklist', 'setupForm',
       'setupDocsConn', 'setupWdConn', 'setupWdFolder', 'setupLogWrap', 'setupLog',
       'setupTabs', 'setupAiSummary', 'setupAiProvider', 'setupAiFields', 'setupAiLabel', 'setupAiUrl', 'setupAiUrlField', 'setupAiUrlHint',
-      'setupAiModel', 'setupAiModelList', 'setupAiClaudeKey', 'setupAiCursorKey', 'setupAiClaudeHint', 'setupAiCursorHint',
+      'setupAiModel', 'setupAiClaudeKey', 'setupAiCursorKey', 'setupAiClaudeHint', 'setupAiCursorHint',
       'btnSetupTestAi', 'setupAiTestResult',
       'btnSetupRetry', 'btnSetupBack', 'btnSetupNext', 'btnSetupInstall', 'btnSetupContinue',
       'stepper', 'scanStatus', 'moduleTableBody', 'btnToSelect',
@@ -1370,12 +1433,12 @@
       'btnClearSelection', 'wfCheckAll', 'wfTableBody', 'btnToReview',
       'reviewStatus', 'reviewTabs', 'reviewBody', 'btnReviewDetails', 'promptCard', 'promptStats', 'promptSystem', 'promptUser',
       'btnRebuildPrompt', 'btnCopyPrompt', 'btnGenerate',
-      'docStatus', 'btnViewDetails', 'btnViewDocument', 'btnCopyMd', 'btnDownloadMd', 'btnDownloadPdf', 'docNotice', 'docView', 'btnToSave',
+      'docStatus', 'btnViewDetails', 'btnViewDocument', 'btnCopyMd', 'btnDownloadMd', 'btnDownloadPdf', 'docNotice', 'docView', 'docTabs', 'btnToSave',
       'saveCard', 'btnStartOver',
       'drawerBackdrop', 'settingsDrawer', 'btnCloseSettings', 'settingsDocsConn', 'settingsWdConn',
       'settingsWorkDriveFolder', 'settingsAudience',
       'settingsAiProvider', 'settingsAiFields', 'settingsAiLabel', 'settingsAiUrl', 'settingsAiUrlHint', 'settingsAiModel',
-      'settingsAiModelList', 'settingsAiKey', 'settingsAiKeyHint', 'btnTestAi', 'btnClearAiKey', 'settingsAiTestResult',
+      'settingsAiKey', 'settingsAiKeyHint', 'btnTestAi', 'btnClearAiKey', 'settingsAiTestResult',
       'settingsRecordNote', 'btnSettingsRecheck', 'btnSaveSettings',
       'modalBackdrop', 'modalTitle', 'modalBody', 'modalCancel', 'modalConfirm', 'issueTip', 'maskSelBtn',
       'ruleDocBackdrop', 'ruleDocTitle', 'ruleDocBody', 'btnCloseRuleDoc'
@@ -1390,7 +1453,8 @@
     dom.btnSaveSettings.addEventListener('click', saveSettings);
     dom.settingsAiProvider.addEventListener('change', () => renderAiFields(true));
     dom.btnTestAi.addEventListener('click', () => testAiConnection());
-    dom.settingsAiKey.addEventListener('change', () => loadAiModels(aiFormValues(), dom.settingsAiModelList));
+    dom.settingsAiKey.addEventListener('change', () => loadAiModels(aiFormValues(), dom.settingsAiModel));
+    $('settingsAiWorkspace').addEventListener('change', () => loadAiModels(aiFormValues(), dom.settingsAiModel));
     dom.btnClearAiKey.addEventListener('click', () => {
       state.clearAiKey = true;
       renderAiFields(false);
@@ -1408,20 +1472,16 @@
     dom.btnSetupInstall.addEventListener('click', installAndVerify);
     dom.btnSetupContinue.addEventListener('click', enterFlow);
     dom.btnSetupNext.addEventListener('click', () => showSetupTab(2));
+    $('btnSetupEdit').addEventListener('click', () => showSetupEditor(2));
     dom.btnSetupBack.addEventListener('click', () => showSetupTab(1));
     dom.setupTabs.addEventListener('click', (e) => {
       const tab = e.target.closest('[data-setup-tab]');
       if (tab) showSetupTab(Number(tab.dataset.setupTab));
     });
     dom.setupAiProvider.addEventListener('change', () => renderSetupAiFields(true));
-    dom.btnSetupTestAi.addEventListener('click', () => testAiConnection(setupAiValues(), dom.setupAiTestResult, dom.btnSetupTestAi, dom.setupAiModelList));
-    dom.setupAiClaudeKey.addEventListener('change', () => {
-      if (dom.setupAiProvider.value === 'cursor') return;
-      loadAiModels(setupAiValues(), dom.setupAiModelList);
-    });
-    dom.setupAiCursorKey.addEventListener('change', () => {
-      if (dom.setupAiProvider.value !== 'cursor') return;
-      loadAiModels(setupAiValues(), dom.setupAiModelList);
+    dom.btnSetupTestAi.addEventListener('click', () => testAiConnection(setupAiValues(), dom.setupAiTestResult, dom.btnSetupTestAi, dom.setupAiModel));
+    [dom.setupAiClaudeKey, dom.setupAiCursorKey, $('setupAiWorkspace')].forEach(el => {
+      el.addEventListener('change', () => loadAiModels(setupAiValues(), dom.setupAiModel));
     });
 
     dom.stepper.addEventListener('click', (e) => {
@@ -1443,11 +1503,19 @@
 
     dom.wfSearch.addEventListener('input', renderWorkflowTable);
     [dom.wfModuleFilter, dom.wfStatusFilter, dom.wfFunctionsOnly].forEach(el => el.addEventListener('change', renderWorkflowTable));
+    $('btnModuleDoc').addEventListener('click', () => generateModuleDocument(dom.wfModuleFilter.value));
     dom.wfCheckAll.addEventListener('change', () => {
-      visibleWorkflows().forEach((wf) => {
-        if (dom.wfCheckAll.checked) state.selectedWorkflowIds.add(wf.id);
-        else state.selectedWorkflowIds.delete(wf.id);
-      });
+      const visible = visibleWorkflows();
+      if (dom.wfCheckAll.checked) {
+        visible.forEach((wf) => {
+          if (state.selectedWorkflowIds.size < MAX_BATCH) state.selectedWorkflowIds.add(wf.id);
+        });
+        if (visible.some(wf => !state.selectedWorkflowIds.has(wf.id))) {
+          showToast(`Up to ${MAX_BATCH} workflow rules can be documented at a time. The first ${MAX_BATCH} are selected.`, 'warning');
+        }
+      } else {
+        visible.forEach(wf => state.selectedWorkflowIds.delete(wf.id));
+      }
       selectionChanged();
     });
     dom.wfTableBody.addEventListener('click', (e) => {
@@ -1460,8 +1528,14 @@
       const row = e.target.closest('tr[data-id]');
       if (!row) return;
       const id = row.dataset.id;
-      if (state.selectedWorkflowIds.has(id)) state.selectedWorkflowIds.delete(id);
-      else state.selectedWorkflowIds.add(id);
+      if (state.selectedWorkflowIds.has(id)) {
+        state.selectedWorkflowIds.delete(id);
+      } else if (state.selectedWorkflowIds.size >= MAX_BATCH) {
+        showToast(`Up to ${MAX_BATCH} workflow rules can be documented at a time. Clear one first.`, 'warning');
+        return;
+      } else {
+        state.selectedWorkflowIds.add(id);
+      }
       selectionChanged();
     });
     dom.btnClearSelection.addEventListener('click', () => {
@@ -1476,10 +1550,20 @@
       state.activeReviewId = tab.dataset.reviewId;
       renderReview();
     });
+    dom.docTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest('[data-doc-id]');
+      if (!tab) return;
+      state.activeDocId = tab.dataset.docId;
+      renderDocs();
+    });
     bindFunctionReviewEvents();
     dom.btnRebuildPrompt.addEventListener('click', buildPrompt);
     dom.btnCopyPrompt.addEventListener('click', () => copyText(promptAsText(), dom.btnCopyPrompt, 'Copy prompt'));
-    [dom.promptSystem, dom.promptUser].forEach(el => el.addEventListener('input', updatePromptStats));
+    [dom.promptSystem, dom.promptUser].forEach(el => el.addEventListener('input', () => {
+      const wf = activeReviewWorkflow();
+      if (wf) state.prompts[wf.id] = { ...(state.prompts[wf.id] || {}), system: dom.promptSystem.value, user: dom.promptUser.value };
+      updatePromptStats();
+    }));
     dom.btnGenerate.addEventListener('click', generateDocument);
     dom.btnReviewDetails.addEventListener('click', () => openRuleView('details'));
     dom.btnViewDetails.addEventListener('click', () => openRuleView('details'));
@@ -1490,9 +1574,9 @@
       if (e.key === 'Escape' && dom.ruleDocBackdrop && !dom.ruleDocBackdrop.hidden) closeRuleDoc();
     });
 
-    dom.btnCopyMd.addEventListener('click', () => copyText(state.generated?.markdown || '', dom.btnCopyMd, 'Copy text'));
-    dom.btnDownloadMd.addEventListener('click', downloadMarkdown);
-    dom.btnDownloadPdf.addEventListener('click', downloadPdf);
+    dom.btnCopyMd.addEventListener('click', () => copyText(activeDoc()?.generated?.markdown || '', dom.btnCopyMd, 'Copy text'));
+    dom.btnDownloadMd.addEventListener('click', () => downloadMarkdown(activeDoc()));
+    dom.btnDownloadPdf.addEventListener('click', () => downloadPdf(activeDoc()));
     dom.btnToSave.addEventListener('click', onSaveButton);
     dom.btnStartOver.addEventListener('click', startOver);
   }
@@ -1630,8 +1714,9 @@
       }
 
       const savedKey = state.ai.provider && state.aiKeys[state.ai.provider];
+      const workspaceNote = state.ai.provider === 'anthropic' && state.ai.workspaceId ? ` Workspace ${state.ai.workspaceId}.` : '';
       if (savedKey) {
-        setCheck('model', 'ok', `${aiName()} (${state.ai.model}). API key saved on Living_Docs_Settings.`);
+        setCheck('model', 'ok', `${aiName()} (${state.ai.model}). API key saved on Living_Docs_Settings.${workspaceNote}`);
       } else if (state.hasApiKey) {
         setCheck('model', 'ok', `${aiName()} (${state.ai.model}) with a saved API key.`);
       } else if (state.ai.provider) {
@@ -1667,8 +1752,7 @@
       dom.setupSubtitle.textContent = 'You can continue now. The notes below only matter for later steps.';
     } else {
       dom.setupTitle.textContent = 'Everything is ready';
-      dom.setupSubtitle.textContent = 'Loading your workflows…';
-      setTimeout(enterFlow, 700);
+      dom.setupSubtitle.textContent = 'Continue to your workflows, or use Edit settings to change the connection or AI provider (for example the Claude workspace ID).';
     }
   }
 
@@ -1692,6 +1776,8 @@
     if (dom.btnSetupNext) dom.btnSetupNext.hidden = !editing || tab !== 1;
     if (dom.btnSetupInstall) dom.btnSetupInstall.hidden = !editing || tab !== 2;
     if (dom.btnSetupContinue) dom.btnSetupContinue.hidden = editing;
+    const edit = $('btnSetupEdit');
+    if (edit) edit.hidden = editing;
   }
 
   function showSetupEditor(tab) {
@@ -1957,14 +2043,24 @@
     }
   }
 
-  async function logDocumentation(pdfBytes) {
+  async function logDocumentation(doc, pdfBytes) {
     if (!canWriteRecords()) return { ok: false, rows: [], message: 'Records are only written inside Zoho CRM. Use Download PDF to keep the file.' };
     await loadDocLogs().catch(() => null);
     if (!state.docLog.ok) {
       return { ok: false, rows: [], message: `${logModuleApi('documents')} could not be read (${state.docLog.error || 'unknown error'}). Run Install from the setup check.` };
     }
-    const g = state.generated;
+    const g = doc.generated;
     const entity = logModuleApi('documents');
+    g.savedRecords = g.savedRecords || {};
+    // The saved version wins over the one guessed at generation time (another user may have saved in between).
+    const savedVersion = g.savedRecords[String(doc.wf.id)]?.version;
+    const version = savedVersion || nextDocVersion(doc.wf);
+    if (version !== g.version) {
+      g.version = version;
+      g.fileName = documentFileName(doc.wf, version, g.at);
+      g.pdfBytes = null;
+      pdfBytes = await docPdfBytes(doc);
+    }
     const pdfFile = new File([pdfBytes], g.fileName, { type: 'application/pdf' });
     const user = await currentUserInfo();
     const base = {
@@ -1972,14 +2068,11 @@
       Generated_By: g.generatedBy || aiName(),
       Generated_At: zohoDateTime(g.at),
       Generated_By_User: userLabel(user),
-      Audience: state.audience,
-      Masked_Values: maskedValueCount()
+      Audience: state.audience
     };
-    const nextVersion = id => Number(state.docLog.byItem[id]?.Doc_Version || 0) + 1;
     const items = [];
-    for (const wf of state.reviewWorkflows) {
+    for (const wf of [doc.wf]) {
       const itemId = String(wf.id);
-      const version = nextVersion(itemId);
       const fns = wf.function_code || [];
       const hashLines = [];
       const snapshots = [];
@@ -1996,9 +2089,10 @@
       }
       items.push({
         label: wf.name, type: 'Workflow', version,
+        existingId: state.docLog.byItem[itemId]?.id || null,
         row: {
           ...base,
-          Name: `v${version} · ${wf.name}`.slice(0, 120),
+          Name: String(wf.name).slice(0, 120),
           Item_Type: 'Workflow', CRM_Module: wf.module || '', Item_Name: wf.name, Item_Id: itemId,
           Doc_Version: version,
           Related_Items: clip(hashLines.join('\n'), 2000),
@@ -2008,13 +2102,19 @@
         }
       });
     }
-    // A retry after a partial failure reuses the records this document already created instead of adding new versions.
-    g.savedRecords = g.savedRecords || {};
+    // One record per workflow: later versions update it and add their PDF as another attachment.
+    // A retry after a partial failure reuses the record this document already wrote.
     const rows = [];
     for (const item of items) {
       const prev = g.savedRecords[item.row.Item_Id];
-      const res = prev ? { ok: true, id: prev.id } : await writeDocRecord(entity, item.row, null);
-      if (res.ok && res.id && !prev) g.savedRecords[item.row.Item_Id] = { id: res.id, version: item.version, attached: false };
+      let action = prev ? prev.action : (item.existingId ? 'Updated' : 'Created');
+      let res = prev ? { ok: true, id: prev.id } : await writeDocRecord(entity, item.row, item.existingId);
+      // Only create a fresh record when the old one is really gone; other failures must not add a second record.
+      if (!prev && !res.ok && item.existingId && /not.?found|invalid.?id|INVALID_DATA|deleted|does not exist/i.test(res.message || '')) {
+        res = await writeDocRecord(entity, item.row, null);
+        action = 'Created';
+      }
+      if (res.ok && res.id && !prev) g.savedRecords[item.row.Item_Id] = { id: res.id, version: item.version, action, attached: false };
       const saved = g.savedRecords[item.row.Item_Id];
       const attach = !res.ok || !res.id ? { ok: false, message: res.message }
         : saved.attached ? { ok: true, message: '' }
@@ -2024,7 +2124,7 @@
         label: item.label,
         type: item.type,
         version: saved ? saved.version : item.version,
-        action: 'Created',
+        action,
         id: res.id,
         ok: res.ok && attach.ok,
         saved: res.ok,
@@ -2227,11 +2327,21 @@
         </tr>`;
     }).join('') : '<tr class="empty-row"><td colspan="7">No workflow rules match these filters.</td></tr>';
     updateSelectionUI(rows);
+    renderModuleDocButton();
+  }
+
+  function renderModuleDocButton() {
+    const btn = $('btnModuleDoc');
+    if (!btn) return;
+    const mod = dom.wfModuleFilter.value;
+    const count = mod && mod !== 'ALL' ? state.allWorkflowsList.filter(wf => wf.module === mod).length : 0;
+    btn.hidden = !count;
+    if (count && !btn.classList.contains('is-busy')) btn.textContent = `Generate ${moduleLabel(mod)} document (${plural(count, 'rule')})`;
   }
 
   function updateSelectionUI(rows) {
     const count = state.selectedWorkflowIds.size;
-    dom.selectedCountPill.textContent = `${count} selected`;
+    dom.selectedCountPill.textContent = `${count} of ${MAX_BATCH} selected`;
     dom.btnToReview.disabled = count === 0;
     dom.btnToReview.textContent = count ? `Review ${count} selected` : 'Review selected';
     const visible = rows || visibleWorkflows();
@@ -2241,8 +2351,9 @@
   }
 
   function selectionChanged() {
-    state.generated = null;
-    state.saved = null;
+    state.docs = [];
+    state.prompts = {};
+    state.moduleRun = null;
     if (state.maxStep > 2) limitSteps(2);
     renderWorkflowTable();
   }
@@ -2275,10 +2386,11 @@
   }
 
   async function startReview() {
-    const selected = state.allWorkflowsList.filter(wf => state.selectedWorkflowIds.has(wf.id));
+    const selected = state.allWorkflowsList.filter(wf => state.selectedWorkflowIds.has(wf.id)).slice(0, MAX_BATCH);
     if (!selected.length) return;
-    state.generated = null;
-    state.saved = null;
+    state.docs = [];
+    state.prompts = {};
+    state.moduleRun = null;
     state.reviewDocMode = 'details';
     limitSteps(3);
     goToStep(3);
@@ -2467,13 +2579,10 @@
 
   function openRuleView(mode) {
     if (mode === 'document') {
-      if (state.generated && state.generated.markdown) {
-        dom.docView.innerHTML = renderMarkdown(state.generated.markdown);
-        dom.docStatus.textContent = `Written by ${state.generated.generatedBy || aiName()}. Check the preview, then save it.`;
-        dom.docNotice.hidden = true;
-        setDocButtons(true);
+      if (state.docs.length) {
         if (state.maxStep < 4) limitSteps(4);
         goToStep(4);
+        renderDocs();
         return;
       }
       generateDocument();
@@ -2593,8 +2702,8 @@
     return text.replace(/(?<![\w{])\d{9,}(?![\w}])/g, '{{ID}}');
   }
 
-  function maskedWorkflowsForAI() {
-    return state.reviewWorkflows.map(({ id, raw, ...wf }) => ({
+  function maskedWorkflowsForAI(workflows = state.reviewWorkflows) {
+    return workflows.map(({ id, raw, ...wf }) => ({
       ...wf,
       criteria: scrubIdsForAI(wf.criteria),
       description: scrubIdsForAI(wf.description || ''),
@@ -3623,22 +3732,40 @@ return response.toString();`;
         <div class="card-head"><h3>Function code</h3><span class="muted small">Secrets are masked and the code is checked before anything is sent to the AI</span></div>
         ${renderFunctions(wf)}
       </div>`;
+    showPromptFor(wf);
   }
 
+  function activeReviewWorkflow() {
+    const list = state.reviewWorkflows;
+    return list.find(w => String(w.id) === String(state.activeReviewId)) || list[0] || null;
+  }
+
+  function showPromptFor(wf) {
+    const p = (wf && state.prompts[wf.id]) || { system: '', user: '' };
+    dom.promptSystem.value = p.system || '';
+    dom.promptUser.value = p.user || '';
+    updatePromptStats();
+  }
+
+  // One prompt per rule, so every rule is documented by its own AI call.
   async function buildPrompt() {
-    if (!state.reviewWorkflows.length) return;
+    const list = state.reviewWorkflows;
+    if (!list.length) return;
     setBusy(dom.btnRebuildPrompt, true);
     dom.btnGenerate.disabled = true;
     try {
-      const resp = window.LivingDocsAI.buildWorkflowPrompt(maskedWorkflowsForAI(), promptSnapshot(), state.audience);
-      dom.promptSystem.value = resp.system || '';
-      dom.promptUser.value = resp.user || '';
-      updatePromptStats();
-      const { total, withSource } = functionSummary(state.reviewWorkflows);
+      list.forEach((wf) => {
+        const resp = window.LivingDocsAI.buildWorkflowPrompt(maskedWorkflowsForAI([wf]), promptSnapshot(), state.audience, state.docDetail);
+        state.prompts[wf.id] = { system: resp.system || '', user: resp.user || '', maxTokens: resp.maxTokens };
+      });
+      showPromptFor(activeReviewWorkflow());
+      const { total, withSource } = functionSummary(list);
       const masked = maskedValueCount();
+      const docs = list.length > 1 ? ` Each of the ${list.length} rules gets its own document.` : '';
       dom.reviewStatus.textContent = total
-        ? `${withSource} of ${total} function${total === 1 ? '' : 's'} loaded with code${masked ? `, ${plural(masked, 'secret value')} masked` : ''}. Check the criteria and code, then generate.`
-        : 'No custom functions on the selected rules. The document covers criteria and actions.';
+        ? `${withSource} of ${total} function${total === 1 ? '' : 's'} loaded with code${masked ? `, ${plural(masked, 'secret value')} masked` : ''}.${docs} Check the criteria and code, then generate.`
+        : `No custom functions on the selected rules. The document covers criteria and actions.${docs}`;
+      dom.btnGenerate.textContent = list.length > 1 ? `Generate ${list.length} documents` : 'Generate documentation';
       dom.btnGenerate.disabled = false;
     } catch (err) {
       dom.reviewStatus.textContent = `The prompt could not be built: ${err.message || err}`;
@@ -3649,8 +3776,10 @@ return response.toString();`;
 
   function updatePromptStats() {
     const chars = dom.promptSystem.value.length + dom.promptUser.value.length;
+    const wf = state.reviewWorkflows.length > 1 ? activeReviewWorkflow() : null;
+    const forRule = wf ? `For ${wf.name}: ` : '';
     dom.promptStats.textContent = chars
-      ? `${chars.toLocaleString()} characters, about ${Math.ceil(chars / 4).toLocaleString()} tokens`
+      ? `${forRule}${chars.toLocaleString()} characters, about ${Math.ceil(chars / 4).toLocaleString()} tokens`
       : 'Built from the rule and its function code';
   }
 
@@ -3661,94 +3790,205 @@ return response.toString();`;
   // ==========================================
   // STEP 4: DOCUMENT
   // ==========================================
-  function documentFileName() {
-    const list = state.reviewWorkflows;
-    const base = list.length === 1 ? list[0].name : `${list.length}_workflow_rules`;
-    const slug = String(base).replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 60) || 'Workflow';
-    return `Workflow_Documentation_${slug}_${new Date().toISOString().slice(0, 10)}.pdf`;
+  function nextDocVersion(wf) {
+    return Number(state.docLog.byItem?.[String(wf.id)]?.Doc_Version || 0) + 1;
+  }
+
+  function documentFileName(wf, version, at) {
+    const slug = String(wf.name).replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '').slice(0, 60) || 'Workflow';
+    const date = (at ? new Date(at) : new Date()).toISOString().slice(0, 10);
+    return `Workflow_Documentation_${slug}_v${version || nextDocVersion(wf)}_${date}.pdf`;
   }
 
   function setDocButtons(enabled) {
-    [dom.btnCopyMd, dom.btnDownloadMd, dom.btnDownloadPdf, dom.btnToSave].forEach((btn) => { btn.disabled = !enabled; });
+    [dom.btnCopyMd, dom.btnDownloadMd, dom.btnDownloadPdf].forEach((btn) => { btn.disabled = !enabled; });
     renderSaveButton();
   }
 
-  async function generateDocument() {
-    const user = dom.promptUser.value.trim();
-    if (!user) {
-      showToast('The prompt is empty. Use Reset prompt to rebuild it.', 'warning');
+  function activeDoc() {
+    return state.docs.find(d => String(d.wf.id) === String(state.activeDocId)) || state.docs[0] || null;
+  }
+
+  function docStateLabel(doc) {
+    if (doc.status === 'pending') return '<span class="pill pill-blue">Writing…</span>';
+    if (doc.status === 'error') return '<span class="pill pill-red">Failed</span>';
+    if (doc.saving) return '<span class="pill pill-blue">Saving…</span>';
+    if (doc.saved && doc.saved.ok) return '<span class="pill pill-green">Saved</span>';
+    if (doc.saved && !doc.saved.ok) return '<span class="pill pill-amber">Not saved</span>';
+    return '<span class="pill pill-gray">Ready</span>';
+  }
+
+  function renderDocs() {
+    const docs = state.docs;
+    const doc = activeDoc();
+    dom.docTabs.innerHTML = docs.length > 1 ? docs.map(d => `
+      <button class="review-tab ${doc && d.wf.id === doc.wf.id ? 'active' : ''}" data-doc-id="${escapeHtml(d.wf.id)}">
+        ${escapeHtml(d.wf.name)}${docStateLabel(d)}
+      </button>`).join('') : '';
+    dom.docNotice.hidden = true;
+    if (!doc) {
+      dom.docView.innerHTML = '';
+      dom.docView.dataset.key = '';
+      setDocButtons(false);
       return;
     }
-    if (!(await ensureAiConfigured('generate documentation'))) return;
-    const count = state.reviewWorkflows.length;
-    state.generated = null;
-    state.saved = null;
-    limitSteps(4);
-    goToStep(4);
-    setDocButtons(false);
-    dom.docNotice.hidden = true;
-    dom.docStatus.textContent = `${aiName()} is writing documentation for ${count} workflow rule${count === 1 ? '' : 's'}…`;
-    dom.docView.innerHTML = loadingBlock('This usually takes 20 to 60 seconds.');
-    const entries = allMaskEntries();
-    const system = scrubIdsForAI(DR.scrubText(dom.promptSystem.value.trim(), entries));
-    const safeUser = scrubIdsForAI(DR.scrubText(user, entries));
-    if (system !== dom.promptSystem.value.trim() || safeUser !== user) {
-      showToast('Secrets or IDs typed into the prompt were masked before sending.', 'warning');
-    }
-    try {
-      const resp = await window.LivingDocsAI.callAi(currentAiConfig(), { system, user: safeUser, maxTokens: 8000, temperature: 0.2 });
-      const markdown = window.LivingDocsAI.cleanMarkdown(resp.text);
-      if (!markdown) throw new Error(`${resp.label} did not return a document.`);
-      state.generated = {
-        markdown,
-        model: resp.model || '',
-        generatedBy: `${resp.label} (${resp.model})`,
-        at: new Date().toISOString(),
-        fileName: documentFileName()
-      };
-      dom.docView.innerHTML = renderMarkdown(state.generated.markdown);
-      const tokens = resp.tokens_out ? `, ${Number(resp.tokens_in || 0).toLocaleString()} tokens in and ${Number(resp.tokens_out).toLocaleString()} out` : '';
-      dom.docStatus.textContent = `Written by ${state.generated.generatedBy}${tokens}. Check the preview, then save it.`;
-      const notes = [];
-      if (resp.redacted) notes.push(`The final check replaced ${plural(resp.redacted, 'credential or ID')} in the prompt before sending it.`);
-      if (entries.length && /\{\{[A-Z0-9_]+\}\}/.test(state.generated.markdown)) {
-        notes.push('Secrets from the function code stay masked in this document, for example {{TOKEN_1}}, because the PDF is attached to a CRM record.');
-      }
-      if (notes.some(Boolean)) {
-        dom.docNotice.textContent = notes.filter(Boolean).join(' ');
+    const finished = docs.filter(d => d.status !== 'pending').length;
+    const progress = docs.length > 1 ? ` ${finished} of ${docs.length} documents finished.` : '';
+    const key = `${doc.wf.id}:${doc.status}:${doc.generated ? doc.generated.at : ''}`;
+    const redraw = dom.docView.dataset.key !== key;
+    dom.docView.dataset.key = key;
+    if (!redraw && doc.status === 'done') {
+      dom.docStatus.textContent = `${doc.wf.name}: written by ${doc.generated.generatedBy}${doc.tokens}.${progress} Check the preview, then save it.`;
+      if (doc.notes.length) {
+        dom.docNotice.textContent = doc.notes.join(' ');
         dom.docNotice.hidden = false;
       }
       setDocButtons(true);
-      saveDocumentToCrm({ auto: true });
+      return;
+    }
+    if (doc.status === 'pending') {
+      dom.docStatus.textContent = `${aiName()} is writing the documentation for ${doc.wf.name}…${progress}`;
+      dom.docView.innerHTML = loadingBlock('This usually takes 20 to 60 seconds.');
+    } else if (doc.status === 'error') {
+      dom.docStatus.textContent = `The document for ${doc.wf.name} could not be written.${progress}`;
+      dom.docView.innerHTML = `<div class="notice error">${escapeHtml(doc.error)}</div>
+        <button class="btn btn-secondary btn-sm" data-doc-retry="${escapeHtml(doc.wf.id)}">Try this rule again</button>`;
+      const retry = dom.docView.querySelector('[data-doc-retry]');
+      if (retry) retry.addEventListener('click', () => retryDocument(doc));
+    } else {
+      dom.docStatus.textContent = `${doc.wf.name}: written by ${doc.generated.generatedBy}${doc.tokens}.${progress} Check the preview, then save it.`;
+      dom.docView.innerHTML = renderMarkdown(doc.generated.markdown);
+      if (doc.notes.length) {
+        dom.docNotice.textContent = doc.notes.join(' ');
+        dom.docNotice.hidden = false;
+      }
+    }
+    setDocButtons(doc.status === 'done');
+  }
+
+  async function writeDocument(doc, entries) {
+    const p = state.prompts[doc.wf.id] || {};
+    const system = scrubIdsForAI(DR.scrubText(String(p.system || '').trim(), entries));
+    const user = scrubIdsForAI(DR.scrubText(String(p.user || '').trim(), entries));
+    try {
+      const resp = await window.LivingDocsAI.callAi(currentAiConfig(), { system, user, maxTokens: p.maxTokens || 3000 });
+      const markdown = window.LivingDocsAI.cleanMarkdown(resp.text);
+      if (!markdown) throw new Error(`${resp.label} did not return a document.`);
+      const at = new Date().toISOString();
+      const version = nextDocVersion(doc.wf);
+      doc.generated = {
+        markdown,
+        model: resp.model || '',
+        generatedBy: `${resp.label} (${resp.model})`,
+        at,
+        version,
+        fileName: documentFileName(doc.wf, version, at)
+      };
+      doc.tokens = resp.tokens_out ? `, ${Number(resp.tokens_in || 0).toLocaleString()} tokens in and ${Number(resp.tokens_out).toLocaleString()} out` : '';
+      doc.notes = [];
+      if (resp.redacted) doc.notes.push(`The final check replaced ${plural(resp.redacted, 'credential or ID')} in the prompt before sending it.`);
+      if (entries.length && /\{\{[A-Z0-9_]+\}\}/.test(markdown)) {
+        doc.notes.push('Secrets from the function code stay masked in this document, for example {{TOKEN_1}}, because the PDF is attached to a CRM record.');
+      }
+      doc.status = 'done';
     } catch (err) {
-      dom.docStatus.textContent = 'The document could not be written.';
-      dom.docView.innerHTML = `<div class="notice error">${escapeHtml(err.message || String(err))}</div>`;
+      doc.status = 'error';
+      doc.error = err.message || String(err);
     }
   }
 
-  async function currentPdfBytes() {
-    if (!state.generated) throw new Error('Generate the document first.');
-    if (!state.generated.pdfBytes) state.generated.pdfBytes = await renderPdfBytes();
-    return state.generated.pdfBytes;
+  // Loops over the reviewed rules and writes one document per rule, MAX_BATCH at a time. Finished documents are saved to CRM one by one.
+  async function generateDocument() {
+    const list = state.reviewWorkflows.slice(0, MAX_BATCH);
+    if (!list.length) return;
+    const empty = list.find(wf => !String(state.prompts[wf.id]?.user || '').trim());
+    if (empty) {
+      showToast(`The prompt for ${empty.name} is empty. Use Reset prompt to rebuild it.`, 'warning');
+      return;
+    }
+    if (!(await ensureAiConfigured('generate documentation'))) return;
+    state.moduleRun = null;
+    const docs = list.map(wf => ({ wf, status: 'pending', generated: null, saved: null, saving: false, error: '', notes: [], tokens: '' }));
+    state.docs = docs;
+    state.activeDocId = docs[0].wf.id;
+    limitSteps(4);
+    goToStep(4);
+    renderDocs();
+    renderSaveCard();
+    const entries = allMaskEntries();
+    let saves = Promise.resolve();
+    await mapPool(docs, MAX_BATCH, async (doc) => {
+      await writeDocument(doc, entries);
+      if (state.docs !== docs) return;
+      renderDocs();
+      if (doc.status === 'done') saves = saves.then(() => saveDoc(doc));
+    });
+    await saves;
+    if (state.docs !== docs) return;
+    finishRun(docs);
   }
 
-  async function downloadPdf() {
+  async function retryDocument(doc) {
+    const docs = state.docs;
+    Object.assign(doc, { status: 'pending', error: '', generated: null, saved: null, notes: [], tokens: '' });
+    renderDocs();
+    await writeDocument(doc, allMaskEntries());
+    if (state.docs !== docs) return;
+    renderDocs();
+    if (state.moduleRun) {
+      renderSaveCard();
+      finishModuleRun(docs);
+      return;
+    }
+    if (doc.status === 'done') await saveDoc(doc);
+    finishRun(docs);
+  }
+
+  function finishRun(docs) {
+    if (docs.some(d => d.status === 'pending')) return;
+    limitSteps(5);
+    renderSaveButton();
+    renderSaveCard();
+    const written = docs.filter(d => d.status === 'done');
+    const saved = written.filter(d => d.saved && d.saved.ok).length;
+    const failed = docs.length - written.length;
+    const parts = [`${plural(written.length, 'document')} written`, `${saved} saved to CRM`];
+    if (failed) parts.push(`${failed} failed`);
+    showToast(`${parts.join(', ')}.`, failed || saved < written.length ? 'warning' : 'success');
+  }
+
+  let pdfQueue = Promise.resolve();
+  // html2pdf renders through one hidden sheet at a time, so PDFs are made one after another.
+  function docPdfBytes(doc) {
+    if (!doc || !doc.generated) return Promise.reject(new Error('Generate the document first.'));
+    if (doc.generated.pdfBytes) return Promise.resolve(doc.generated.pdfBytes);
+    const job = pdfQueue.then(async () => {
+      if (!doc.generated.pdfBytes) doc.generated.pdfBytes = await renderPdfBytes(doc);
+      return doc.generated.pdfBytes;
+    });
+    pdfQueue = job.catch(() => null);
+    return job;
+  }
+
+  async function downloadPdf(doc) {
+    if (!doc || !doc.generated) return;
     setBusy(dom.btnDownloadPdf, true);
     try {
-      downloadPdfBytes(await currentPdfBytes(), state.generated.fileName);
+      downloadPdfBytes(await docPdfBytes(doc), doc.generated.fileName);
     } catch (err) {
       showToast(err.message || String(err), 'error');
     } finally {
-      setBusy(dom.btnDownloadPdf, !state.generated);
+      setBusy(dom.btnDownloadPdf, false);
+      dom.btnDownloadPdf.disabled = !(activeDoc() && activeDoc().generated);
     }
   }
 
-  function downloadMarkdown() {
-    if (!state.generated) return;
-    const blob = new Blob([state.generated.markdown], { type: 'text/markdown;charset=utf-8' });
+  function downloadMarkdown(doc) {
+    if (!doc || !doc.generated) return;
+    const blob = new Blob([doc.generated.markdown], { type: 'text/markdown;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = state.generated.fileName.replace(/\.pdf$/, '.md');
+    link.download = doc.generated.fileName.replace(/\.pdf$/, '.md');
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1500);
   }
@@ -3818,18 +4058,41 @@ return response.toString();`;
   // ==========================================
   // STEP 5: SAVE TO CRM
   // ==========================================
+  function writtenDocs() {
+    return state.docs.filter(d => d.status === 'done');
+  }
+
   function renderSaveButton() {
-    const s = state.saved;
     const btn = dom.btnToSave;
-    if (!state.generated) { btn.textContent = 'Save to CRM'; return; }
-    if (state.saving) btn.textContent = 'Saving to CRM…';
-    else if (s && s.ok) btn.textContent = 'View saved records';
-    else if (s && s.log && !s.log.pending) btn.textContent = 'Save to CRM again';
+    const written = writtenDocs();
+    const run = state.moduleRun;
+    if (run) {
+      const pending = state.docs.some(d => d.status === 'pending');
+      btn.disabled = !written.length || pending;
+      btn.textContent = run.saving ? 'Saving to CRM…'
+        : run.saved && run.saved.ok ? 'View saved record'
+          : run.saved && run.saved.log && !run.saved.log.pending ? 'Save to CRM again'
+            : 'Save module document';
+      return;
+    }
+    btn.disabled = !written.length;
+    if (!written.length) { btn.textContent = 'Save to CRM'; return; }
+    if (written.some(d => d.saving)) btn.textContent = 'Saving to CRM…';
+    else if (written.every(d => d.saved && d.saved.ok)) btn.textContent = 'View saved records';
+    else if (written.some(d => d.saved && !d.saved.ok)) btn.textContent = 'Save to CRM again';
     else btn.textContent = 'Save to CRM';
   }
 
-  function onSaveButton() {
-    if (state.saved && state.saved.ok) {
+  async function onSaveButton() {
+    if (state.moduleRun) {
+      const run = state.moduleRun;
+      limitSteps(5);
+      goToStep(5);
+      if (!(run.saved && run.saved.ok) && !run.saving) await saveModuleRun();
+      return;
+    }
+    const written = writtenDocs();
+    if (written.length && written.every(d => d.saved && d.saved.ok)) {
       limitSteps(5);
       goToStep(5);
       return;
@@ -3837,37 +4100,36 @@ return response.toString();`;
     saveDocumentToCrm();
   }
 
-  async function saveDocumentToCrm({ auto = false } = {}) {
-    if (!state.generated || state.saving) return;
-    const generated = state.generated;
-    state.saving = true;
-    state.saved = { fileName: generated.fileName, at: new Date(), log: { pending: true } };
-    setBusy(dom.btnToSave, true);
+  // Saves every written document that is not in CRM yet, one after another, then opens the save step.
+  async function saveDocumentToCrm() {
+    for (const doc of writtenDocs()) {
+      if (!(doc.saved && doc.saved.ok)) await saveDoc(doc);
+    }
+    limitSteps(5);
+    goToStep(5);
+  }
+
+  async function saveDoc(doc) {
+    if (!doc.generated || doc.saving) return;
+    const docs = state.docs;
+    doc.saving = true;
+    doc.saved = { log: { pending: true } };
+    renderDocs();
     renderSaveButton();
     renderSaveCard();
     let log;
     try {
-      const bytes = await currentPdfBytes();
-      log = await logDocumentation(bytes);
+      log = await logDocumentation(doc, await docPdfBytes(doc));
     } catch (err) {
       log = { ok: false, rows: [], message: err.message || String(err) };
     } finally {
-      state.saving = false;
-      setBusy(dom.btnToSave, false);
+      doc.saving = false;
     }
-    if (state.generated !== generated) return;
-    state.saved = { ...state.saved, ok: log.ok, message: log.message, log };
-    limitSteps(5);
+    doc.saved = { ok: log.ok, message: log.message, log, at: new Date() };
+    if (state.docs !== docs) return;
+    renderDocs();
     renderSaveButton();
     renderSaveCard();
-    if (auto) {
-      const created = (log.rows || []).filter(r => r.saved && r.action === 'Created').length;
-      const updated = (log.rows || []).filter(r => r.saved && r.action === 'Updated').length;
-      if (log.ok) showToast(`Saved to CRM: ${[created && `${created} created`, updated && `${updated} updated`].filter(Boolean).join(', ')}. The PDF is attached.`);
-      else showToast(`The document was not saved to CRM. ${log.message || ''}`.trim(), 'warning');
-    } else {
-      goToStep(5);
-    }
   }
 
   function openCrmRecord(entity, id) {
@@ -3898,44 +4160,54 @@ return response.toString();`;
   }
 
   function renderSaveCard() {
-    const s = state.saved || {};
-    const rules = state.reviewWorkflows.map(wf => wf.name).join(', ');
+    if (state.moduleRun) {
+      renderModuleSaveCard();
+      return;
+    }
+    const docs = state.docs;
     const entity = logModuleApi('documents');
-    const meta = `
-      <div class="save-meta">
-        <div><span>File</span><span>${escapeHtml(s.fileName || '')}</span></div>
-        <div><span>CRM module</span><span>${escapeHtml(entity)}</span></div>
-        <div><span>Workflow rules</span><span>${escapeHtml(rules)}</span></div>
-        ${state.generated ? `<div><span>Generated by</span><span>${escapeHtml(state.generated.generatedBy || '')}</span></div>` : ''}
-      </div>`;
-    const pending = s.log && s.log.pending;
-    dom.saveCard.innerHTML = pending ? `
+    const written = docs.filter(d => d.status === 'done');
+    const busy = docs.some(d => d.status === 'pending' || d.saving);
+    const allSaved = written.length > 0 && written.length === docs.length && written.every(d => d.saved && d.saved.ok);
+    const docBlocks = docs.map((d) => {
+      const s = d.saved || {};
+      const status = d.status === 'pending' ? 'Being written…'
+        : d.status === 'error' ? `Not written: ${d.error}`
+          : d.saving || (s.log && s.log.pending) ? 'Saving to CRM…'
+            : s.ok ? 'Saved to CRM' : s.log ? `Not saved: ${s.message || 'CRM did not accept the record.'}` : 'Waiting to be saved';
+      return `
+        <div class="save-doc">
+          <div class="save-meta">
+            <div><span>Workflow rule</span><span>${escapeHtml(d.wf.name)}</span></div>
+            ${d.generated ? `<div><span>File</span><span>${escapeHtml(d.generated.fileName)}</span></div>` : ''}
+            ${d.generated ? `<div><span>Generated by</span><span>${escapeHtml(d.generated.generatedBy || '')}</span></div>` : ''}
+            <div><span>Status</span><span>${escapeHtml(status)}</span></div>
+          </div>
+          ${s.log && !s.log.pending ? renderDocLogResult(s.log) : ''}
+          ${d.generated ? `<div class="save-actions">
+            ${s.log && !s.log.pending && !s.ok && !d.saving ? `<button class="btn btn-primary btn-sm" data-save-action="retry" data-doc="${escapeHtml(d.wf.id)}">Try again</button>` : ''}
+            <button class="btn btn-secondary btn-sm" data-save-action="download" data-doc="${escapeHtml(d.wf.id)}">Download PDF</button>
+          </div>` : ''}
+        </div>`;
+    }).join('');
+    const head = busy ? `
       <h2>Saving to CRM</h2>
-      <p class="muted">Creating the PDF, then creating or updating the documentation record and attaching the file.</p>
-      ${meta}
-      ${renderDocLogResult(s.log)}` : s.ok ? `
+      <p class="muted">Each rule's document is written, turned into a PDF, and saved as its own record in ${escapeHtml(entity)}.</p>`
+      : allSaved ? `
       <div class="save-icon ok">${ICON.check.replace('<svg ', '<svg width="26" height="26" ')}</div>
       <h2>Saved to CRM</h2>
-      <p class="muted">Every saved document adds one record per workflow rule to ${escapeHtml(entity)}, named v1, v2, v3 and so on. Its functions are listed on that record, and the PDF is attached to it.</p>
-      ${meta}
-      ${renderDocLogResult(s.log)}
-      <div class="save-actions">
-        <button class="btn btn-primary" data-save-action="download">Download PDF</button>
-      </div>` : `
+      <p class="muted">Each workflow rule has one record in ${escapeHtml(entity)}, named after the workflow. Saving again updates that record to the next version and attaches the new PDF (v1, v2, v3 and so on), so earlier versions stay in its attachments.</p>`
+        : `
       <div class="save-icon error">${ICON.cross.replace('<svg ', '<svg width="24" height="24" ')}</div>
-      <h2>The document was not saved to CRM</h2>
-      <p class="muted">${escapeHtml(s.message || 'CRM did not accept the record.')}</p>
-      ${meta}
-      ${renderDocLogResult(s.log)}
-      <div class="save-actions">
-        <button class="btn btn-primary" data-save-action="retry">Try again</button>
-        <button class="btn btn-secondary" data-save-action="download">Download PDF</button>
-      </div>`;
+      <h2>${docs.length > 1 ? 'Some documents were not saved to CRM' : 'The document was not saved to CRM'}</h2>
+      <p class="muted">Check the details below and try again.</p>`;
+    dom.saveCard.innerHTML = `${head}<div class="save-docs">${docBlocks}</div>`;
     dom.saveCard.querySelectorAll('[data-save-action]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const action = btn.dataset.saveAction;
-        if (action === 'download') downloadPdf();
-        if (action === 'retry') saveDocumentToCrm();
+        const doc = state.docs.find(d => String(d.wf.id) === btn.dataset.doc);
+        if (!doc) return;
+        if (btn.dataset.saveAction === 'download') downloadPdf(doc);
+        if (btn.dataset.saveAction === 'retry') saveDoc(doc);
       });
     });
     dom.saveCard.querySelectorAll('[data-open-record]').forEach((btn) => {
@@ -3946,11 +4218,367 @@ return response.toString();`;
   function startOver() {
     state.selectedWorkflowIds.clear();
     state.reviewWorkflows = [];
-    state.generated = null;
-    state.saved = null;
+    state.docs = [];
+    state.prompts = {};
+    state.moduleRun = null;
     limitSteps(2);
     renderWorkflowTable();
     goToStep(2);
+  }
+
+  // ==========================================
+  // MODULE MASTER DOCUMENT
+  // ==========================================
+  // Every workflow rule of one module is written by its own AI call (MAX_BATCH at a time), then all of
+  // them go into one PDF on a single "<Module>_Master_Document" record. Later runs update that record
+  // and attach the next version's PDF.
+  const moduleDocItemId = module => `module:${module}`;
+
+  function moduleDocName(module) {
+    const slug = String(moduleLabel(module) || module).replace(/[^\w-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    return `${slug || module}_Master_Document`;
+  }
+
+  function nextModuleVersion(module) {
+    return Number(state.docLog.byItem?.[moduleDocItemId(module)]?.Doc_Version || 0) + 1;
+  }
+
+  function moduleFileName(module, version, at) {
+    return `${moduleDocName(module)}_v${version}_${new Date(at || Date.now()).toISOString().slice(0, 10)}.pdf`;
+  }
+
+  async function loadModuleWorkflows(rules, onProgress) {
+    const hydrated = new Array(rules.length);
+    let done = 0;
+    await mapPool(rules.map((wf, i) => ({ wf, i })), 4, async ({ wf, i }) => {
+      hydrated[i] = await hydrateWorkflowRecord(wf);
+      done += 1;
+      if (onProgress) onProgress(done, rules.length);
+    });
+    return attachFunctionCodeToWorkflows(hydrated);
+  }
+
+  // A function used by several rules is sent with its code only once; later rules refer to that section.
+  function moduleWorkflowsForAI(workflows) {
+    const firstUse = new Map();
+    return workflows.map((wf) => {
+      const [masked] = maskedWorkflowsForAI([wf]);
+      masked.function_code = (masked.function_code || []).map((fn, i) => {
+        const original = (wf.function_code || [])[i] || fn;
+        if (!fn.source) return fn;
+        const key = fnKey(original);
+        const owner = firstUse.get(key);
+        if (!owner) {
+          firstUse.set(key, wf.name);
+          return fn;
+        }
+        const { source, ...rest } = fn;
+        return { ...rest, shared: true, note: `Same function as in the workflow rule "${owner}", where its code is walked through. Describe it here in one line and refer to that rule.` };
+      });
+      return masked;
+    });
+  }
+
+  async function generateModuleDocument(module) {
+    if (!module || module === 'ALL') return;
+    const rules = state.allWorkflowsList.filter(wf => wf.module === module);
+    if (!rules.length) return;
+    if (!(await ensureAiConfigured('generate documentation'))) return;
+    const label = moduleLabel(module);
+    const run = { module, label, generated: null, saved: null, saving: false };
+    state.moduleRun = run;
+    state.docs = [];
+    state.prompts = {};
+    state.selectedWorkflowIds.clear();
+    limitSteps(4);
+    goToStep(4);
+    dom.docTabs.innerHTML = '';
+    dom.docNotice.hidden = true;
+    dom.docView.dataset.key = '';
+    dom.docView.innerHTML = loadingBlock('Downloading the rules and their function code');
+    dom.docStatus.textContent = `Loading ${plural(rules.length, 'workflow rule')} of ${label} with their function code…`;
+    setDocButtons(false);
+    renderSaveCard();
+
+    let loaded;
+    try {
+      loaded = await loadModuleWorkflows(rules, (done, total) => {
+        if (state.moduleRun === run) dom.docStatus.textContent = `Loading ${label}: ${done} of ${total} rules…`;
+      });
+      await loadFieldsForModules(loaded).catch(() => null);
+    } catch (err) {
+      if (state.moduleRun !== run) return;
+      dom.docStatus.textContent = `The rules of ${label} could not be loaded.`;
+      dom.docView.innerHTML = `<div class="notice error">${escapeHtml(err.message || String(err))}</div>`;
+      return;
+    }
+    if (state.moduleRun !== run) return;
+
+    state.reviewWorkflows = loaded;
+    state.activeReviewId = loaded[0] && loaded[0].id;
+    reviewFunctions(loaded);
+    const forAI = moduleWorkflowsForAI(loaded);
+    loaded.forEach((wf, i) => {
+      const resp = window.LivingDocsAI.buildWorkflowPrompt([forAI[i]], promptSnapshot(), state.audience, state.docDetail);
+      state.prompts[wf.id] = { system: resp.system || '', user: resp.user || '', maxTokens: resp.maxTokens };
+    });
+    renderReview();
+    showPromptFor(activeReviewWorkflow());
+
+    const docs = loaded.map(wf => ({ wf, status: 'pending', generated: null, saved: null, saving: false, error: '', notes: [], tokens: '' }));
+    state.docs = docs;
+    state.activeDocId = docs[0].wf.id;
+    renderDocs();
+    renderSaveCard();
+    const entries = allMaskEntries();
+    await mapPool(docs, MAX_BATCH, async (doc) => {
+      await writeDocument(doc, entries);
+      if (state.docs !== docs) return;
+      renderDocs();
+      renderSaveCard();
+    });
+    if (state.docs !== docs) return;
+    finishModuleRun(docs);
+  }
+
+  // Saves on its own when every rule was written; with failures the user retries them or saves the rest.
+  function finishModuleRun(docs) {
+    const run = state.moduleRun;
+    if (!run || docs.some(d => d.status === 'pending')) return;
+    limitSteps(5);
+    const failed = docs.filter(d => d.status !== 'done').length;
+    renderSaveButton();
+    renderSaveCard();
+    if (!failed) {
+      saveModuleRun();
+      return;
+    }
+    showToast(`${plural(docs.length - failed, 'rule')} documented, ${failed} failed. Retry the failed rules, or save the module document without them.`, 'warning');
+  }
+
+  function modulePdfSections(run, docs) {
+    const written = docs.filter(d => d.status === 'done');
+    const missing = docs.filter(d => d.status !== 'done');
+    const g = run.generated;
+    const writers = [...new Set(written.map(d => d.generated.generatedBy).filter(Boolean))].join(', ');
+    const cover = `
+      <header class="pdf-cover">
+        <div class="pdf-brand">${escapeHtml(run.label)} · master document · v${escapeHtml(g.version)} · ${escapeHtml(formatDate(g.at))} · ${written.length} rules · ${escapeHtml(writers || aiName())}</div>
+        ${missing.length ? `<p class="pdf-missing">Not in this version: ${missing.map(d => escapeHtml(d.wf.name)).join(', ')}</p>` : ''}
+      </header>`;
+    return [cover, ...written.map(d => `<section class="pdf-rule">${renderMarkdown(d.generated.markdown)}</section>`)];
+  }
+
+  function modulePdfBytes(run, docs) {
+    const g = run.generated;
+    if (g.pdfBytes) return Promise.resolve(g.pdfBytes);
+    const job = pdfQueue.then(async () => {
+      if (!g.pdfBytes) g.pdfBytes = await renderSectionsPdf(modulePdfSections(run, docs), g.fileName, `${run.label} master document`, { continuous: true });
+      return g.pdfBytes;
+    });
+    pdfQueue = job.catch(() => null);
+    return job;
+  }
+
+  function prepareModuleGenerated(run, docs, version) {
+    const written = docs.filter(d => d.status === 'done');
+    const key = written.map(d => `${d.wf.id}:${d.generated.at}`).join('|');
+    const g = run.generated;
+    if (g && g.version === version && g.key === key) return g;
+    const at = new Date().toISOString();
+    run.generated = {
+      at,
+      key,
+      version,
+      fileName: moduleFileName(run.module, version, at),
+      generatedBy: [...new Set(written.map(d => d.generated.generatedBy).filter(Boolean))].join(', ') || aiName(),
+      pdfBytes: null
+    };
+    return run.generated;
+  }
+
+  async function logModuleDocumentation(run, docs) {
+    if (!canWriteRecords()) return { ok: false, rows: [], message: 'Records are only written inside Zoho CRM. Use Download PDF to keep the file.' };
+    await loadDocLogs().catch(() => null);
+    if (!state.docLog.ok) {
+      return { ok: false, rows: [], message: `${logModuleApi('documents')} could not be read (${state.docLog.error || 'unknown error'}). Run Install from the setup check.` };
+    }
+    const entity = logModuleApi('documents');
+    const itemId = moduleDocItemId(run.module);
+    // A retry after a failed attachment reuses the record and version this run already wrote. Once that
+    // version is attached, changed content (for example retried rules) is saved as the next version.
+    const contentKey = docs.filter(d => d.status === 'done').map(d => `${d.wf.id}:${d.generated.at}`).join('|');
+    if (run.savedRecord && run.savedRecord.attached && run.savedRecord.key !== contentKey) run.savedRecord = null;
+    const prev = run.savedRecord || null;
+    const existingId = prev ? prev.id : (state.docLog.byItem[itemId]?.id || null);
+    const version = prev ? prev.version : nextModuleVersion(run.module);
+    const g = prepareModuleGenerated(run, docs, version);
+    const pdfBytes = await modulePdfBytes(run, docs);
+    const written = docs.filter(d => d.status === 'done');
+
+    const seen = new Set();
+    const hashLines = [];
+    const snapshots = [`// Workflow rules: ${written.map(d => d.wf.name).join(', ')}`];
+    let masked = 0;
+    for (const d of written) {
+      for (const fn of d.wf.function_code || []) {
+        const key = fnKey(fn);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (!fn.source) {
+          hashLines.push(`${fn.api_name || fn.name || 'function'} [${key}] (code not loaded)`);
+          continue;
+        }
+        const r = fnReview(fn).result ? fnReview(fn) : runFnReview(fn);
+        hashLines.push(functionHashLine(fn, await sourceHash(fn.source)));
+        masked += r.result.mask.entries.length;
+        if (!fn.source_truncated) snapshots.push(`// ===== ${fn.api_name || fn.name} =====\n${r.result.mask.masked}`);
+      }
+    }
+    const user = await currentUserInfo();
+    const row = {
+      Name: moduleDocName(run.module).slice(0, 120),
+      Item_Type: 'Module',
+      CRM_Module: run.module,
+      Item_Name: run.label,
+      Item_Id: itemId,
+      Doc_Version: version,
+      File_Name: g.fileName,
+      Generated_By: clip(g.generatedBy, 150),
+      Generated_At: zohoDateTime(g.at),
+      Generated_By_User: userLabel(user),
+      Audience: state.audience,
+      Related_Items: clip(hashLines.join('\n'), 2000),
+      Masked_Values: masked,
+      Source_Hash: await sourceHash(written.flatMap(d => (d.wf.function_code || []).map(f => f.source || '')).join('\n')),
+      Source_Snapshot: clip(snapshots.join('\n\n'))
+    };
+
+    let action = prev ? prev.action : (existingId ? 'Updated' : 'Created');
+    let res = prev ? { ok: true, id: prev.id } : await writeDocRecord(entity, row, existingId);
+    if (!prev && !res.ok && existingId && /not.?found|invalid.?id|INVALID_DATA|deleted|does not exist/i.test(res.message || '')) {
+      res = await writeDocRecord(entity, row, null);
+      action = 'Created';
+    }
+    if (res.ok && res.id && !prev) run.savedRecord = { id: res.id, version, action, attached: false, key: contentKey };
+    const saved = run.savedRecord;
+    const pdfFile = new File([pdfBytes], g.fileName, { type: 'application/pdf' });
+    const attach = !res.ok || !res.id ? { ok: false, message: res.message }
+      : saved.attached ? { ok: true, message: '' }
+        : await attachPdfToRecord(entity, res.id, pdfFile);
+    if (saved && attach.ok) saved.attached = true;
+    const rows = [{
+      label: row.Name,
+      type: `${run.label} · ${plural(written.length, 'workflow rule')}`,
+      version,
+      action,
+      id: res.id,
+      ok: res.ok && attach.ok,
+      saved: res.ok,
+      attached: attach.ok,
+      message: res.ok ? attach.message : res.message
+    }];
+    await loadDocLogs().catch(() => null);
+    renderModuleTable();
+    const failed = rows.filter(r => !r.ok);
+    return { ok: !failed.length, rows, entity, message: failed.length ? `${failed[0].label}: ${failed[0].message}` : '' };
+  }
+
+  async function saveModuleRun() {
+    const run = state.moduleRun;
+    const docs = state.docs;
+    if (!run || run.saving || !docs.some(d => d.status === 'done') || docs.some(d => d.status === 'pending')) return;
+    run.saving = true;
+    run.saved = { log: { pending: true } };
+    renderSaveButton();
+    renderSaveCard();
+    let log;
+    try {
+      log = await logModuleDocumentation(run, docs);
+    } catch (err) {
+      log = { ok: false, rows: [], message: err.message || String(err) };
+    } finally {
+      run.saving = false;
+    }
+    run.saved = { ok: log.ok, message: log.message, log, at: new Date() };
+    if (state.moduleRun !== run) return;
+    renderSaveButton();
+    renderSaveCard();
+    showToast(log.ok ? `${moduleDocName(run.module)} v${run.generated.version} saved to CRM.` : (log.message || 'The module document was not saved.'), log.ok ? 'success' : 'error');
+  }
+
+  async function downloadModulePdf() {
+    const run = state.moduleRun;
+    if (!run || !state.docs.some(d => d.status === 'done')) return;
+    try {
+      const contentKey = state.docs.filter(d => d.status === 'done').map(d => `${d.wf.id}:${d.generated.at}`).join('|');
+      const current = run.savedRecord && run.savedRecord.key === contentKey;
+      prepareModuleGenerated(run, state.docs, current ? run.savedRecord.version : nextModuleVersion(run.module));
+      downloadPdfBytes(await modulePdfBytes(run, state.docs), run.generated.fileName);
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    }
+  }
+
+  function renderModuleSaveCard() {
+    const run = state.moduleRun;
+    const docs = state.docs;
+    const entity = logModuleApi('documents');
+    const written = docs.filter(d => d.status === 'done');
+    const failedDocs = docs.filter(d => d.status === 'error');
+    const pending = docs.filter(d => d.status === 'pending').length;
+    const s = run.saved || {};
+    const name = moduleDocName(run.module);
+    const status = !docs.length ? 'Loading the workflow rules…'
+      : pending ? `Writing ${written.length + failedDocs.length} of ${docs.length} rules…`
+        : run.saving || (s.log && s.log.pending) ? 'Saving to CRM…'
+          : s.ok ? 'Saved to CRM' : s.log ? `Not saved: ${s.message || 'CRM did not accept the record.'}` : 'Waiting to be saved';
+    const head = s.ok ? `
+      <div class="save-icon ok">${ICON.check.replace('<svg ', '<svg width="26" height="26" ')}</div>
+      <h2>${escapeHtml(name)} saved</h2>
+      <p class="muted">${escapeHtml(run.label)} has one record in ${escapeHtml(entity)}. Every new run updates it to the next version and attaches that version's PDF, so earlier versions stay in its attachments.</p>`
+      : `
+      <h2>${escapeHtml(run.label)} master document</h2>
+      <p class="muted">Each workflow rule is written by its own AI call, ${MAX_BATCH} at a time. All of them are combined into one PDF on the ${escapeHtml(name)} record.</p>`;
+    const done = !pending && docs.length && !run.saving;
+    dom.saveCard.innerHTML = `${head}
+      <div class="save-docs"><div class="save-doc">
+        <div class="save-meta">
+          <div><span>Record</span><span>${escapeHtml(name)}</span></div>
+          <div><span>Workflow rules</span><span>${written.length} written${failedDocs.length ? `, ${failedDocs.length} failed` : ''}${pending ? `, ${pending} in progress` : ''} of ${docs.length}</span></div>
+          ${run.generated ? `<div><span>File</span><span>${escapeHtml(run.generated.fileName)}</span></div>` : ''}
+          <div><span>Status</span><span>${escapeHtml(status)}</span></div>
+        </div>
+        ${failedDocs.length && !pending ? `<div class="notice warning">Not written: ${failedDocs.map(d => `${escapeHtml(d.wf.name)} (${escapeHtml(d.error)})`).join('; ')}</div>` : ''}
+        ${s.log && !s.log.pending ? renderDocLogResult(s.log) : ''}
+        ${done && written.length ? `<div class="save-actions">
+          ${failedDocs.length ? '<button class="btn btn-secondary btn-sm" data-module-action="retry-failed">Retry failed rules</button>' : ''}
+          ${!s.ok ? `<button class="btn btn-primary btn-sm" data-module-action="save">${s.log ? 'Try again' : failedDocs.length ? `Save without ${plural(failedDocs.length, 'failed rule')}` : 'Save to CRM'}</button>` : ''}
+          <button class="btn btn-secondary btn-sm" data-module-action="download">Download PDF</button>
+        </div>` : ''}
+      </div></div>`;
+    dom.saveCard.querySelectorAll('[data-module-action]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const action = btn.dataset.moduleAction;
+        if (action === 'download') downloadModulePdf();
+        if (action === 'save') saveModuleRun();
+        if (action === 'retry-failed') {
+          const list = state.docs;
+          const retry = list.filter(d => d.status === 'error');
+          retry.forEach(d => Object.assign(d, { status: 'pending', error: '', generated: null, notes: [], tokens: '' }));
+          renderDocs();
+          renderSaveCard();
+          await mapPool(retry, MAX_BATCH, async (d) => {
+            await writeDocument(d, allMaskEntries());
+            if (state.docs === list) { renderDocs(); renderSaveCard(); }
+          });
+          if (state.docs === list) finishModuleRun(list);
+        }
+      });
+    });
+    dom.saveCard.querySelectorAll('[data-open-record]').forEach((btn) => {
+      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openRecord));
+    });
   }
 
   // ==========================================
@@ -3961,15 +4589,17 @@ return response.toString();`;
     dom.settingsWdConn.value = state.settings.workdriveConnection || '';
     dom.settingsWorkDriveFolder.value = state.settings.workdriveFolder === 'folder_living_docs_crm' ? '' : (state.settings.workdriveFolder || '');
     dom.settingsAudience.value = state.audience;
+    $('settingsDocDetail').value = state.docDetail;
     state.clearAiKey = false;
     dom.settingsAiProvider.value = state.ai.provider || '';
     dom.settingsAiLabel.value = state.ai.label || '';
     dom.settingsAiUrl.value = state.ai.apiUrl || '';
-    dom.settingsAiModel.value = state.ai.model || '';
+    fillModelSelect(dom.settingsAiModel, state.ai.provider, null, state.ai.model);
+    $('settingsAiWorkspace').value = state.ai.workspaceId || '';
     dom.settingsAiKey.value = '';
     dom.settingsAiTestResult.hidden = true;
     renderAiFields(false);
-    if (state.ai.provider === 'cursor' && state.ai.hasApiKey) loadAiModels(aiFormValues(), dom.settingsAiModelList);
+    if (state.ai.provider && state.ai.hasApiKey) loadAiModels(aiFormValues(), dom.settingsAiModel);
     renderSettingsRecordStatus();
     dom.drawerBackdrop.hidden = false;
     dom.settingsDrawer.classList.add('open');
@@ -3991,26 +4621,49 @@ return response.toString();`;
     anthropic: 'Create a key in the Anthropic console under Settings > API keys.',
     cursor: 'Create a user API key at cursor.com/dashboard/api. Each request runs a short cloud agent that is deleted afterwards.'
   };
-  const AI_MODEL_SUGGESTIONS = {
-    anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-3-5-haiku-latest'],
-    cursor: ['composer-2', 'claude-4.6-sonnet-thinking']
+  // Shown until the provider returns the models this key can use.
+  const AI_MODEL_OPTIONS = {
+    anthropic: [
+      { id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5' },
+      { id: 'claude-opus-4-1', displayName: 'Claude Opus 4.1' },
+      { id: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5' },
+      { id: 'claude-sonnet-4-0', displayName: 'Claude Sonnet 4' },
+      { id: 'claude-opus-4-0', displayName: 'Claude Opus 4' },
+      { id: 'claude-3-7-sonnet-latest', displayName: 'Claude Sonnet 3.7' },
+      { id: 'claude-3-5-haiku-latest', displayName: 'Claude Haiku 3.5' }
+    ],
+    cursor: [
+      { id: 'composer-2', displayName: 'Composer 2' },
+      { id: 'claude-4.6-sonnet-thinking', displayName: 'Claude 4.6 Sonnet (thinking)' }
+    ]
   };
   const aiModelCache = {};
 
-  // Fills a datalist with the models the Cursor key can use (GET /v1/models).
-  async function loadAiModels(values, listEl) {
-    if (values.aiProvider !== 'cursor' || !listEl) return;
-    const key = values.aiApiKey || state.aiKeys.cursor || '';
-    if (!key) return;
-    const cacheKey = `${values.aiApiUrl}|${key.slice(-6)}`;
+  function fillModelSelect(selectEl, provider, models, wanted) {
+    if (!selectEl) return;
+    const list = (models && models.length ? models : AI_MODEL_OPTIONS[provider] || []).slice();
+    const current = wanted || selectEl.value || aiPreset(provider).model || '';
+    if (current && !list.some(m => m.id === current)) list.unshift({ id: current, displayName: `${current} (saved)` });
+    selectEl.innerHTML = list.length
+      ? list.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.displayName && m.displayName !== m.id ? `${m.displayName} · ${m.id}` : m.id)}</option>`).join('')
+      : '<option value="">Choose a provider first</option>';
+    selectEl.value = list.some(m => m.id === current) ? current : (list[0] ? list[0].id : '');
+  }
+
+  // Replaces the model options with the ones the key can use (GET /v1/models). Keeps the defaults on failure.
+  async function loadAiModels(values, selectEl) {
+    if (!selectEl || !values.aiProvider) return;
+    const cfg = aiConfigFrom(values);
+    if (!cfg.apiKey) return;
+    const cacheKey = `${cfg.provider}|${cfg.apiUrl}|${cfg.workspaceId || ''}|${cfg.apiKey.slice(-6)}`;
     try {
       let models = aiModelCache[cacheKey];
-      if (!models) models = await window.LivingDocsAI.cursorModels({ apiUrl: values.aiApiUrl, apiKey: key });
+      if (!models) models = await window.LivingDocsAI.listModels(cfg);
       if (models && models.length) {
         aiModelCache[cacheKey] = models;
-        listEl.innerHTML = models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.displayName || m.id)}</option>`).join('');
+        fillModelSelect(selectEl, cfg.provider, models, selectEl.value);
       }
-    } catch (_) { /* suggestions stay on the defaults */ }
+    } catch (_) { /* the default options stay */ }
   }
 
   function aiPreset(provider) {
@@ -4027,6 +4680,7 @@ return response.toString();`;
       aiLabel: dom.settingsAiLabel.value.trim(),
       aiApiUrl: preset.editableUrl === false ? preset.apiUrl : dom.settingsAiUrl.value.trim(),
       aiModel: dom.settingsAiModel.value.trim(),
+      aiWorkspaceId: provider === 'anthropic' ? $('settingsAiWorkspace').value.trim() : '',
       aiApiKey: typed || stored
     };
   }
@@ -4040,11 +4694,13 @@ return response.toString();`;
     dom.setupAiProvider.value = state.ai.provider || '';
     dom.setupAiLabel.value = state.ai.label || '';
     dom.setupAiUrl.value = state.ai.apiUrl || '';
-    dom.setupAiModel.value = state.ai.model || '';
+    fillModelSelect(dom.setupAiModel, state.ai.provider, null, state.ai.model);
+    $('setupAiWorkspace').value = state.ai.workspaceId || '';
     dom.setupAiClaudeKey.value = '';
     dom.setupAiCursorKey.value = '';
     dom.setupAiTestResult.hidden = true;
     renderSetupAiFields(false);
+    if (state.ai.provider && state.aiKeys[state.ai.provider]) loadAiModels(setupAiValues(), dom.setupAiModel);
   }
 
   function renderSetupAiFields(providerChanged) {
@@ -4053,15 +4709,16 @@ return response.toString();`;
     if (providerChanged && provider) {
       dom.setupAiLabel.value = preset.label || '';
       dom.setupAiUrl.value = preset.apiUrl || '';
-      dom.setupAiModel.value = preset.model || '';
       dom.setupAiTestResult.hidden = true;
     }
     if (provider && !dom.setupAiUrl.value) dom.setupAiUrl.value = preset.apiUrl || '';
-    if (provider && !dom.setupAiModel.value) dom.setupAiModel.value = preset.model || '';
+    const savedModel = provider === state.ai.provider ? state.ai.model : '';
+    fillModelSelect(dom.setupAiModel, provider, null, providerChanged ? (savedModel || preset.model) : (dom.setupAiModel.value || savedModel || preset.model));
+    if (providerChanged) loadAiModels(setupAiValues(), dom.setupAiModel);
     dom.setupAiLabel.placeholder = preset.label || 'Claude';
     if (dom.setupAiUrlField) dom.setupAiUrlField.hidden = Boolean(provider && preset.editableUrl === false);
     dom.setupAiUrlHint.textContent = AI_URL_HINTS[provider] || '';
-    dom.setupAiModelList.innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+    $('setupAiWorkspaceField').hidden = provider !== 'anthropic';
     $('setupAiClaudeField').hidden = provider !== 'anthropic';
     $('setupAiCursorField').hidden = provider !== 'cursor';
     dom.setupAiClaudeHint.textContent = keySavedText('anthropic');
@@ -4079,6 +4736,7 @@ return response.toString();`;
       aiLabel: dom.setupAiLabel.value.trim() || preset.label || '',
       aiApiUrl: preset.editableUrl === false ? preset.apiUrl : (dom.setupAiUrl.value.trim() || preset.apiUrl || ''),
       aiModel: dom.setupAiModel.value.trim() || preset.model || '',
+      aiWorkspaceId: provider === 'anthropic' ? $('setupAiWorkspace').value.trim() : '',
       aiApiKey: typed || state.aiKeys[provider] || ''
     };
   }
@@ -4096,6 +4754,7 @@ return response.toString();`;
       state.ai.apiUrl = (preset.editableUrl === false ? preset.apiUrl : dom.setupAiUrl.value.trim()) || preset.apiUrl || '';
       state.ai.model = dom.setupAiModel.value.trim() || preset.model || '';
     }
+    state.ai.workspaceId = $('setupAiWorkspace').value.trim();
     refreshAiFromKeys();
   }
 
@@ -4114,17 +4773,18 @@ return response.toString();`;
       state.clearAiKey = false;
       dom.settingsAiLabel.value = preset.label || '';
       dom.settingsAiUrl.value = preset.apiUrl || '';
-      dom.settingsAiModel.value = preset.model || '';
       dom.settingsAiKey.value = '';
       dom.settingsAiTestResult.hidden = true;
     }
     if (provider && !dom.settingsAiUrl.value) dom.settingsAiUrl.value = preset.apiUrl || '';
-    if (provider && !dom.settingsAiModel.value) dom.settingsAiModel.value = preset.model || '';
+    const savedModel = provider === state.ai.provider ? state.ai.model : '';
+    fillModelSelect(dom.settingsAiModel, provider, null, providerChanged ? (savedModel || preset.model) : (dom.settingsAiModel.value || savedModel || preset.model));
+    if (providerChanged) loadAiModels(aiFormValues(), dom.settingsAiModel);
     dom.settingsAiLabel.placeholder = preset.label || '';
     const urlField = dom.settingsAiUrl.closest('.field');
     if (urlField) urlField.hidden = preset.editableUrl === false;
     dom.settingsAiUrlHint.textContent = AI_URL_HINTS[provider] || '';
-    dom.settingsAiModelList.innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+    $('settingsAiWorkspaceField').hidden = provider !== 'anthropic';
     const saved = state.aiKeys[provider] || '';
     const keySaved = Boolean(saved) && !state.clearAiKey;
     dom.settingsAiKey.placeholder = keySaved ? `Saved, ends in …${saved.slice(-4)}. Leave blank to keep it.` : 'Paste the API key';
@@ -4149,12 +4809,13 @@ return response.toString();`;
       label: values.aiLabel || preset.label || '',
       apiUrl: values.aiApiUrl || preset.apiUrl || '',
       model: values.aiModel || preset.model || '',
+      workspaceId: provider === 'anthropic' ? String(values.aiWorkspaceId ?? state.ai.workspaceId ?? '').trim() : '',
       apiKey: String(values.aiApiKey || state.aiKeys[provider] || '').trim()
     };
   }
 
   function currentAiConfig() {
-    return aiConfigFrom({ aiProvider: state.ai.provider, aiLabel: state.ai.label, aiApiUrl: state.ai.apiUrl, aiModel: state.ai.model });
+    return aiConfigFrom({ aiProvider: state.ai.provider, aiLabel: state.ai.label, aiApiUrl: state.ai.apiUrl, aiModel: state.ai.model, aiWorkspaceId: state.ai.workspaceId });
   }
 
   function testProvider(values) {
@@ -4165,7 +4826,7 @@ return response.toString();`;
     const formValues = values && values.aiProvider !== undefined ? values : aiFormValues();
     const result = resultEl || dom.settingsAiTestResult;
     const btn = button || dom.btnTestAi;
-    const models = listEl || dom.settingsAiModelList;
+    const models = listEl || dom.settingsAiModel;
     if (!formValues.aiProvider) { showAiTestResult(false, 'Choose a provider first.', result); return; }
     if (!formValues.aiApiKey) { showAiTestResult(false, 'Enter the API key.', result); return; }
     setBusy(btn, true);
@@ -4208,6 +4869,7 @@ return response.toString();`;
         state.ai.label = next.aiLabel || aiPreset(next.aiProvider).label || '';
         state.ai.apiUrl = next.aiApiUrl || aiPreset(next.aiProvider).apiUrl || '';
         state.ai.model = next.aiModel || aiPreset(next.aiProvider).model || '';
+        state.ai.workspaceId = next.aiWorkspaceId || '';
         refreshAiFromKeys();
         const saved = await saveSettingsRecord();
         if (!saved.ok) throw new Error(saved.message || 'Living_Docs_Settings could not be saved.');
@@ -4232,7 +4894,8 @@ return response.toString();`;
         <label class="field"><span>Provider</span><select id="aiSetupProvider">${providerOptions}</select></label>
         <label class="field"><span>API URL</span><input type="url" id="aiSetupUrl" spellcheck="false" value="${escapeHtml(values.aiApiUrl || '')}" /></label>
         <label class="field"><span>API key <span class="req">required</span></span><input type="password" id="aiSetupKey" autocomplete="off" data-required value="${escapeHtml(values.aiApiKey || '')}" /></label>
-        <label class="field"><span>Model</span><input type="text" id="aiSetupModel" list="aiSetupModels" value="${escapeHtml(values.aiModel || '')}" /><datalist id="aiSetupModels"></datalist></label>
+        <label class="field" id="aiSetupWorkspaceField"><span>Workspace ID <span class="muted">optional</span></span><input type="text" id="aiSetupWorkspace" spellcheck="false" autocomplete="off" placeholder="wrkspc_…" value="${escapeHtml(values.aiWorkspaceId ?? state.ai.workspaceId ?? '')}" /><small>Only needed when the key is not tied to a workspace.</small></label>
+        <label class="field"><span>Model</span><select id="aiSetupModel"></select></label>
         <p class="muted small" id="aiSetupHint"></p>
         <p class="muted small">IDs, org IDs and tokens are masked before anything is sent to the AI.</p>`
     });
@@ -4240,30 +4903,33 @@ return response.toString();`;
     const modelEl = $('aiSetupModel');
     const keyEl = $('aiSetupKey');
     const urlEl = $('aiSetupUrl');
+    const workspaceEl = $('aiSetupWorkspace');
     const current = { ...values };
     const sync = (providerChanged) => {
       const provider = providerEl.value;
       const preset = aiPreset(provider);
-      if (providerChanged || !modelEl.value.trim()) modelEl.value = preset.model || '';
+      if (providerChanged || !modelEl.options.length) {
+        const saved = provider === values.aiProvider ? values.aiModel : '';
+        fillModelSelect(modelEl, provider, null, saved || preset.model);
+      }
       if (providerChanged || !urlEl.value.trim()) {
         urlEl.value = (provider === state.ai.provider && state.ai.apiUrl) || preset.apiUrl || '';
       }
-      if (providerChanged) $('aiSetupModels').innerHTML = '';
-      if (!$('aiSetupModels').children.length) {
-        $('aiSetupModels').innerHTML = (AI_MODEL_SUGGESTIONS[provider] || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
-      }
+      $('aiSetupWorkspaceField').hidden = provider !== 'anthropic';
       $('aiSetupHint').textContent = AI_KEY_HINTS[provider] || '';
       current.aiProvider = provider;
       current.aiLabel = preset.label;
       current.aiApiUrl = urlEl.value.trim() || preset.apiUrl;
-      current.aiModel = modelEl.value.trim() || preset.model;
+      current.aiModel = modelEl.value || preset.model;
+      current.aiWorkspaceId = provider === 'anthropic' ? workspaceEl.value.trim() : '';
       current.aiApiKey = keyEl.value.trim();
     };
-    providerEl.addEventListener('change', () => sync(true));
-    [modelEl, keyEl, urlEl].forEach(el => el.addEventListener('input', () => sync(false)));
-    keyEl.addEventListener('change', () => { sync(false); loadAiModels(current, $('aiSetupModels')); });
+    providerEl.addEventListener('change', () => { sync(true); loadAiModels(current, modelEl); });
+    [keyEl, urlEl, workspaceEl].forEach(el => el.addEventListener('input', () => sync(false)));
+    modelEl.addEventListener('change', () => sync(false));
+    [keyEl, workspaceEl].forEach(el => el.addEventListener('change', () => { sync(false); loadAiModels(current, modelEl); }));
     sync(false);
-    if (current.aiApiKey) loadAiModels(current, $('aiSetupModels'));
+    if (current.aiApiKey) loadAiModels(current, modelEl);
     return pending.then(answer => (answer ? { ...current } : null));
   }
 
@@ -4273,6 +4939,8 @@ return response.toString();`;
     state.settings.workdriveFolder = dom.settingsWorkDriveFolder.value.trim();
     state.audience = dom.settingsAudience.value;
     localStorage.setItem('livingdocs.audience', state.audience);
+    state.docDetail = $('settingsDocDetail').value === 'detailed' ? 'detailed' : 'quick';
+    localStorage.setItem('livingdocs.detail', state.docDetail);
     const ai = aiFormValues();
     if (ai.aiProvider && (!ai.aiApiUrl || !ai.aiModel)) {
       showToast('Enter the API URL and model for the AI provider.', 'warning');
@@ -4287,6 +4955,7 @@ return response.toString();`;
         state.ai.label = ai.aiLabel;
         state.ai.apiUrl = ai.aiApiUrl;
         state.ai.model = ai.aiModel;
+        state.ai.workspaceId = ai.aiWorkspaceId;
         refreshAiFromKeys();
       }
       const saved = await saveSettingsRecord();
@@ -4297,7 +4966,10 @@ return response.toString();`;
       renderAiFields(false);
       showToast(state.ai.provider && !state.ai.hasApiKey ? 'Settings saved. Add the API key to use the AI provider.' : 'Settings saved on Living_Docs_Settings.');
       closeSettings();
-      if (state.reviewWorkflows.length) renderReview();
+      if (state.reviewWorkflows.length) {
+        renderReview();
+        if (Object.keys(state.prompts).length) buildPrompt();
+      }
     } catch (err) {
       showToast(err.message || String(err), 'error');
     } finally {

@@ -55,15 +55,50 @@
 
   <!-- ============ SETUP CHECK ============ -->
   <section class="screen" id="screenSetup">
-    <div class="setup-card">
-      <div class="setup-head">
-        <h1 id="setupTitle">Checking your setup</h1>
-        <p id="setupSubtitle">Confirming the Zoho CRM connection, saved settings and documentation modules before loading your workflows.</p>
+    <div class="setup-skel" id="setupSkeleton" hidden aria-hidden="true">
+      <div class="panel-head">
+        <div>
+          <div class="skel skel-title"></div>
+          <div class="skel skel-line skel-sub"></div>
+        </div>
+      </div>
+      <div class="card skel-card skel-checks">
+        <div class="skel-check-grid">
+          <span class="skel skel-row"></span><span class="skel skel-row"></span>
+          <span class="skel skel-row"></span><span class="skel skel-row"></span>
+          <span class="skel skel-row"></span>
+        </div>
+      </div>
+      <div class="card skel-card skel-form">
+        <div class="skel-tabs">
+          <span class="skel skel-tab"></span><span class="skel skel-tab"></span>
+        </div>
+        <span class="skel skel-line short"></span>
+        <span class="skel skel-line"></span>
+        <span class="skel skel-row"></span>
+        <span class="skel skel-row"></span>
+        <span class="skel skel-row"></span>
+        <span class="skel skel-field"></span>
+      </div>
+      <div class="step-footer">
+        <span class="skel skel-btn"></span>
+        <span class="skel skel-btn wide"></span>
+      </div>
+    </div>
+
+    <div id="setupBody">
+      <div class="panel-head">
+        <div>
+          <h2 id="setupTitle">Checking your setup</h2>
+          <p class="muted" id="setupSubtitle">Confirming the Zoho CRM connection, saved settings and documentation modules before loading your workflows.</p>
+        </div>
       </div>
 
-      <ul class="checklist" id="setupChecklist"></ul>
+      <div class="card setup-checks">
+        <ul class="checklist" id="setupChecklist"></ul>
+      </div>
 
-      <div class="setup-form" id="setupForm" hidden>
+      <div class="card setup-form" id="setupForm" hidden>
         <div class="setup-tabs" id="setupTabs" role="tablist">
           <button type="button" class="setup-tab current" data-setup-tab="1" role="tab" aria-selected="true">
             <span class="num">1</span><span>Connection</span>
@@ -76,13 +111,12 @@
         <div class="setup-tab-panel" id="setupTab1" data-setup-panel="1">
           <div class="scope-guide">
             <div class="section-label">Connections and scopes to create</div>
-            <p class="muted small">In Zoho CRM go to Setup, Developer Hub, Connections. Create one connection for each name below. The link name must match exactly. Add every scope on that connection.</p>
+            <p class="muted small">In Zoho CRM go to Setup, Developer Hub, Connections <code>docsagent_connection</code>. Create one connection for each name below. The link name must match exactly. Add every scope on that connection.</p>
             <div class="scope-grid single">
               <article class="scope-card">
                 <div class="scope-card-head">
                   <div>
                     <div class="scope-service">Zoho CRM</div>
-                    <code>docsagent_connection</code>
                   </div>
                   <button type="button" class="btn btn-ghost btn-sm" data-copy="docsagent_connection" data-copy-label="Copy name">Copy name</button>
                 </div>
@@ -172,12 +206,12 @@
         </div>
       </div>
 
-      <details class="setup-log" id="setupLogWrap" hidden>
+      <details class="card setup-log" id="setupLogWrap" hidden>
         <summary>Installation log</summary>
         <div class="log" id="setupLog"></div>
       </details>
 
-      <div class="setup-actions">
+      <div class="step-footer">
         <button class="btn btn-ghost" id="btnSetupRetry">Check again</button>
         <div class="row gap-8">
           <button class="btn btn-secondary" id="btnSetupEdit" type="button" hidden>Edit settings</button>

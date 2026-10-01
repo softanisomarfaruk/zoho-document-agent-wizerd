@@ -1588,7 +1588,7 @@
   function initElements() {
     [
       'orgChip', 'orgChipLabel', 'btnRescan', 'btnOpenSettings',
-      'screenBoot', 'screenSetup', 'screenFlow', 'setupTitle', 'setupSubtitle', 'setupChecklist', 'setupForm',
+      'screenBoot', 'screenSetup', 'screenFlow', 'setupSkeleton', 'setupBody', 'setupTitle', 'setupSubtitle', 'setupChecklist', 'setupForm',
       'setupDocsConn', 'setupWdConn', 'setupWdFolder', 'setupLogWrap', 'setupLog',
       'setupTabs', 'setupAiSummary', 'setupAiProvider', 'setupAiFields', 'setupAiLabel', 'setupAiUrl', 'setupAiUrlField', 'setupAiUrlHint',
       'setupAiModel', 'setupAiClaudeKey', 'setupAiCursorKey', 'setupAiClaudeHint', 'setupAiCursorHint',
@@ -1851,10 +1851,27 @@
     return !!findCustomModule(modules, apiName);
   }
 
+  function setSetupSkeleton(on) {
+    if (dom.setupSkeleton) {
+      dom.setupSkeleton.hidden = !on;
+      dom.setupSkeleton.setAttribute('aria-hidden', on ? 'false' : 'true');
+    }
+    if (dom.setupBody) dom.setupBody.hidden = !!on;
+    if (dom.screenSetup) dom.screenSetup.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+
   async function runSetupCheck(manual) {
     // A reload with saved settings goes straight to the workflows. The checklist
     // is only shown when something required is missing, or when the admin asks.
-    if (manual) showScreen('setup');
+    // Opening this page shows a skeleton of the verify layout until the check finishes.
+    let verifyLoading = false;
+    const showVerifySkeleton = () => {
+      if (verifyLoading) return;
+      verifyLoading = true;
+      showScreen('setup');
+      setSetupSkeleton(true);
+    };
+    if (manual) showVerifySkeleton();
     resetChecklist();
     dom.setupTitle.textContent = 'Checking your setup';
     dom.setupSubtitle.textContent = 'Confirming the Zoho CRM connection, saved settings and documentation modules before loading your workflows.';
@@ -1865,12 +1882,20 @@
 
     let errors = 0;
     let warnings = 0;
-    const fail = (key, detail) => { errors += 1; setCheck(key, 'error', detail); };
+    const fail = (key, detail) => {
+      errors += 1;
+      setCheck(key, 'error', detail);
+      showVerifySkeleton();
+    };
     const warn = (key, detail) => { warnings += 1; setCheck(key, 'warn', detail); };
 
     try {
       setCheck('settings', 'pending', 'Looking for the Living_Docs_Settings record');
       const { record } = await loadSettings();
+      if (record) setCheck('settings', 'ok', `Loaded from Living_Docs_Settings record ${record.id}.`);
+      else fail('settings', 'No Living_Docs_Settings record yet. Enter the details below and install.');
+      // The rest of this check stays on the verify page, so its skeleton should match that page.
+      if (!aiIsConfigured()) showVerifySkeleton();
 
       setCheck('crm', 'pending', `Calling GET /crm/v8/settings/modules with "${conn()}"`);
       let modules = [];
@@ -1888,9 +1913,6 @@
           setOrg('Connection problem', 'error');
         }
       }
-
-      if (record) setCheck('settings', 'ok', `Loaded from Living_Docs_Settings record ${record.id}.`);
-      else fail('settings', 'No Living_Docs_Settings record yet. Enter the details below and install.');
 
       if (!modules.length) {
         fail('modules', 'Could not be checked until the CRM connection works.');
@@ -1920,6 +1942,7 @@
       }
     } finally {
       setBusy(dom.btnSetupRetry, false);
+      setSetupSkeleton(false);
     }
 
     const aiMissing = !aiIsConfigured();

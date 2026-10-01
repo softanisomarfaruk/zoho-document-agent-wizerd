@@ -1317,8 +1317,13 @@
     setTimeout(() => URL.revokeObjectURL(link.href), 1500);
   }
 
-  function documentFlowSection(wf) {
-    return `<section class="pdf-flow"><h2>Flow</h2>${renderFlowchart(wf)}</section>`;
+  // PDF: the flowchart is drawn smaller, about half the page width, so it fits under the cover instead of
+  // being pushed to the next page. Its pixel size is set on the SVG itself because html2canvas draws an SVG at
+  // its width/height attributes and clips it, ignoring a smaller CSS width.
+  const PDF_FLOWCHART_PX = 340;
+
+  function documentFlowSection(wf, { pdf = false } = {}) {
+    return `<section class="pdf-flow"><h2>Flow</h2>${renderFlowchart(wf, pdf ? { width: PDF_FLOWCHART_PX } : {})}</section>`;
   }
 
   function pdfDocumentHtml(doc) {
@@ -1334,7 +1339,7 @@
           <span><b>Written by</b> ${escapeHtml(g.generatedBy || aiName())}</span>
         </div>
       </header>
-      <article class="doc-view pdf-body">${documentFlowSection(doc.wf)}${renderMarkdown(g.markdown)}</article>`;
+      <article class="doc-view pdf-body">${documentFlowSection(doc.wf, { pdf: true })}${renderMarkdown(g.markdown)}</article>`;
   }
 
   function renderPdfBytes(doc) {
@@ -1350,6 +1355,41 @@
     sheet.className = compact ? 'pdf-sheet compact' : 'pdf-sheet';
     sheet.innerHTML = html;
     return sheet;
+  }
+
+  // html2canvas does not scale an inline SVG to its size reliably (the flowchart came out cropped), so each
+  // flowchart is drawn to a PNG by the browser first and html2canvas only sees an <img>. If the browser refuses
+  // (for example a tainted canvas), the SVG stays as it is.
+  const FLOWCHART_RASTER_SCALE = 3;
+
+  function rasterizeFlowcharts(root) {
+    const svgs = [...root.querySelectorAll('.fc svg')];
+    return Promise.all(svgs.map(svg => new Promise((resolve) => {
+      const w = Number(svg.getAttribute('width')) || FC.width;
+      const h = Number(svg.getAttribute('height')) || FC.width;
+      const source = new Image();
+      source.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * FLOWCHART_RASTER_SCALE);
+          canvas.height = Math.round(h * FLOWCHART_RASTER_SCALE);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+          const img = new Image();
+          img.src = canvas.toDataURL('image/png');
+          // Inline size: a CSS width:auto would otherwise show the PNG at its full 3x resolution.
+          img.style.width = `${w}px`;
+          img.style.height = `${h}px`;
+          img.alt = svg.getAttribute('aria-label') || 'Flowchart';
+          svg.replaceWith(img);
+        } catch (_) { /* keep the SVG */ }
+        resolve();
+      };
+      source.onerror = () => resolve();
+      source.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svg))}`;
+    })));
   }
 
   function continuousChunks(sections, maxCssHeight) {
@@ -1387,7 +1427,8 @@
     const compact = Boolean(options.continuous);
     const scale = compact ? 1.25 : (sections.length > 12 ? 1.5 : 2);
     const parts = compact ? continuousChunks(sections, PDF_MAX_CANVAS_PX / scale) : sections;
-    const sheetFor = html => pdfSheet(html, compact);
+    const sheets = parts.map(html => pdfSheet(html, compact));
+    await Promise.all(sheets.map(rasterizeFlowcharts));
     const margin = compact ? [8, 10, 10, 10] : [12, 12, 16, 12];
     let worker = window.html2pdf().set({
       margin,
@@ -1398,9 +1439,9 @@
       pagebreak: compact
         ? { mode: ['css'] }
         : { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover', '.fc'] }
-    }).from(sheetFor(parts[0])).toPdf();
-    parts.slice(1).forEach((html) => {
-      worker = worker.get('pdf').then(p => { p.addPage(); }).from(sheetFor(html)).toContainer().toCanvas().toPdf();
+    }).from(sheets[0]).toPdf();
+    sheets.slice(1).forEach((sheet) => {
+      worker = worker.get('pdf').then(p => { p.addPage(); }).from(sheet).toContainer().toCanvas().toPdf();
     });
     const pdf = await worker.get('pdf');
     const total = pdf.internal.getNumberOfPages();
@@ -2649,7 +2690,8 @@
     return lines.length ? lines : [''];
   }
 
-  function renderFlowchart(wf) {
+  // width: draw the SVG at this many pixels wide (the PDF); the layout stays the same and is scaled by viewBox.
+  function renderFlowchart(wf, { width = FC.width } = {}) {
     const id = `fc${++fcSeq}`;
     const parts = [];
     const text = (x, y, value, { size = 12, weight = 400, color = '#1e293b', anchor = 'middle' } = {}) =>
@@ -2764,13 +2806,14 @@
       lx += w;
     });
     const height = Math.ceil(ly + 12);
+    const drawnHeight = Math.round(height * (width / FC.width));
     const marker = (tone) => `
             <marker id="${id}-${tone}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
               <path d="M0,1 L9,5 L0,9 z" fill="${FC[tone]}"/>
             </marker>`;
     return `
       <div class="fc">
-        <svg viewBox="0 0 ${FC.width} ${height}" width="${FC.width}" height="${height}" font-family="${FC.font}" role="img" aria-label="${escapeHtml(`Flowchart of ${wf.name || 'the workflow rule'}`)}" xmlns="http://www.w3.org/2000/svg">
+        <svg viewBox="0 0 ${FC.width} ${height}" width="${width}" height="${drawnHeight}" font-family="${FC.font}" role="img" aria-label="${escapeHtml(`Flowchart of ${wf.name || 'the workflow rule'}`)}" xmlns="http://www.w3.org/2000/svg">
           <defs>${marker('line')}${marker('yes')}${marker('no')}
           </defs>
           ${parts.join('\n          ')}
@@ -5006,7 +5049,7 @@ return response.toString();`;
         <div class="pdf-brand">${escapeHtml(run.label)} · master document · v${escapeHtml(g.version)} · ${escapeHtml(formatDate(g.at))} · ${written.length} rules · ${escapeHtml(writers || aiName())}</div>
         ${missing.length ? `<p class="pdf-missing">Not in this version: ${missing.map(d => escapeHtml(d.wf.name)).join(', ')}</p>` : ''}
       </header>`;
-    return [cover, ...written.map(d => `<section class="pdf-rule">${documentFlowSection(d.wf)}${renderMarkdown(d.generated.markdown)}</section>`)];
+    return [cover, ...written.map(d => `<section class="pdf-rule">${documentFlowSection(d.wf, { pdf: true })}${renderMarkdown(d.generated.markdown)}</section>`)];
   }
 
   function modulePdfBytes(run, docs) {

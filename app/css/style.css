@@ -571,11 +571,32 @@ textarea { font-family: var(--mono); font-size: 12px; line-height: 1.55; resize:
 .doc-view.pdf-body table { font-size: 11px; }
 .doc-view.pdf-body tr, .doc-view.pdf-body pre, .doc-view.pdf-body blockquote { page-break-inside: avoid; break-inside: avoid; }
 .doc-view.pdf-body h2, .doc-view.pdf-body h3 { page-break-after: avoid; break-after: avoid; }
+/* PDF only (the on-screen Details flowchart keeps its size). The flowchart is drawn at about half the page
+   width so even a rule with several conditions fits under the cover; a full-width chart was taller than the
+   space left on page 1, so html2pdf pushed it to page 2 and left the page under "Flow" empty. */
 .pdf-flow { margin: 0 0 16px; }
 .pdf-flow h2 { margin-top: 0; }
-.pdf-sheet .fc { overflow: visible; }
-.pdf-sheet .fc { page-break-inside: avoid; break-inside: avoid; }
-.pdf-sheet .fc svg { min-width: 0; }
+.pdf-sheet .pdf-flow { margin: 0 0 8px; }
+.pdf-sheet .pdf-flow h2 { margin: 0 0 4px; }
+.pdf-sheet .fc {
+  padding: 2px 0 0; border: 0; border-radius: 0; background: none; overflow: visible;
+  page-break-inside: avoid; break-inside: avoid;
+}
+/* Size comes from the SVG's own width/height (see PDF_FLOWCHART_PX); before rendering it becomes a PNG <img>. */
+.pdf-sheet .fc svg { display: block; width: auto; height: auto; min-width: 0; max-width: 100%; margin: 0 auto; }
+.pdf-sheet .fc img { display: block; max-width: 100%; margin: 0 auto; }
+.pdf-sheet:not(.compact) .pdf-cover { margin-bottom: 12px; padding-bottom: 10px; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body h1 { margin: 14px 0 6px; padding-bottom: 4px; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body h2 { margin: 12px 0 4px; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body h3 { margin: 10px 0 3px; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body p { margin: 4px 0; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body ul,
+.pdf-sheet:not(.compact) .doc-view.pdf-body ol { margin: 4px 0; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body li { margin: 1px 0; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body pre,
+.pdf-sheet:not(.compact) .doc-view.pdf-body table,
+.pdf-sheet:not(.compact) .doc-view.pdf-body blockquote { margin: 6px 0; }
+.pdf-sheet:not(.compact) .doc-view.pdf-body .pdf-flow h2 { margin: 0 0 4px; }
 /* Module master document: one continuous flow. Only the workflow heading (h1) separates rules. No extra page gaps. */
 .pdf-sheet.compact .pdf-cover { margin: 0 0 6px; padding: 0 0 4px; border-bottom: 1px solid #cbd5e1; }
 .pdf-sheet.compact .pdf-brand { letter-spacing: 0.04em; font-size: 9px; }

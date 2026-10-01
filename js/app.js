@@ -1027,7 +1027,6 @@
       Claude_Model: fields.claudeModel,
       Workdrive_Folder_Id: fields.workdriveFolder
     };
-    if (fields.claudeApiKey) APIData.Claude_API_Key = fields.claudeApiKey;
     if (fields.scheduleFrequency) APIData.Schedule_Frequency = fields.scheduleFrequency;
 
     const write = async (data, isUpdate) => {
@@ -1182,7 +1181,6 @@
           { field_label: 'Workdrive Connection', data_type: 'text', length: 120 },
           { field_label: 'Claude Model', data_type: 'text', length: 100 },
           { field_label: 'Workdrive Folder Id', data_type: 'text', length: 150 },
-          { field_label: 'Claude API Key', data_type: 'text', length: 255 },
           { field_label: 'Schedule Frequency', data_type: 'text', length: 40 }
         ];
 

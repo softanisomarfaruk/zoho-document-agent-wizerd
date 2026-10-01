@@ -1,37 +1,46 @@
 /*
- * Living Docs AI layer. Runs inside the widget and reaches Claude (Anthropic Messages API) or
- * Cursor (Cloud Agents API v1) through ZOHO.CRM.HTTP, so the uploaded widget needs no server.
+ * Living Docs AI layer. Prompts are masked here, then sent to the standalone Deluge function
+ * livingdocs_llm_gateway, which decrypts the API key inside CRM and calls Claude (Anthropic Messages API)
+ * or Cursor (Cloud Agents API v1). The browser never holds a provider key, except for the moment an
+ * administrator types one into setup and it is handed to livingdocs_save_api_key.
  */
 (function () {
   'use strict';
 
+  // Provider hosts are fixed inside the gateway function, so the URL is shown but not editable.
   const PROVIDERS = {
     anthropic: {
       label: 'Claude',
       apiUrl: 'https://api.anthropic.com/v1/messages',
       model: 'claude-sonnet-4-5',
       keyUrl: 'https://console.anthropic.com/settings/keys',
-      editableUrl: true
+      editableUrl: false
     },
     cursor: {
       label: 'Cursor',
       apiUrl: 'https://api.cursor.com',
       model: 'composer-2',
       keyUrl: 'https://cursor.com/dashboard/api',
-      editableUrl: true
+      editableUrl: false
     }
   };
 
-  // ---------- Zoho HTTP transport ----------
-  function messageOf(data, status) {
-    const msg = data && ((data.error && (data.error.message || data.error)) || data.message);
-    if (typeof msg === 'string' && msg) return msg;
-    if (msg) return JSON.stringify(msg).slice(0, 300);
-    return `The provider returned HTTP ${status}`;
+  const FN = window.LivingDocsFunctions || { SAVE_FN: 'livingdocs_save_api_key', GATEWAY_FN: 'livingdocs_llm_gateway' };
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} did not answer within ${Math.round(ms / 1000)}s`)), ms);
+      Promise.resolve(promise).then(
+        (val) => { clearTimeout(timer); resolve(val); },
+        (err) => { clearTimeout(timer); reject(err); }
+      );
+    });
   }
 
-  // Zoho may hand back the provider body as an object, a JSON string, a double-encoded string,
-  // or text with the JSON inside it. Non-JSON text keeps its full content in `raw`.
+  // ---------- CRM function transport ----------
+  // Zoho may hand back the function output as an object, a JSON string or a double-encoded string.
   function decode(value) {
     let v = value;
     for (let i = 0; i < 3 && typeof v === 'string'; i += 1) {
@@ -48,78 +57,116 @@
     return v;
   }
 
-  function isErrorBody(data) {
-    return Boolean(data && typeof data === 'object' && data.type === 'error' && data.error);
-  }
-
-  function parseResponse(raw) {
-    const value = decode(raw);
-    if (value == null) return {};
-    let status = 0;
-    let data = value;
-    if (typeof value === 'object' && !Array.isArray(value)) {
-      status = Number(value.status_code || value.statusCode || (typeof value.status === 'number' ? value.status : 0));
-      const payload = value.body != null ? value.body : value.response;
-      if (payload != null && payload !== '') data = decode(payload);
+  // FUNCTIONS.execute answers { code, details: { output } }; output is the JSON text the Deluge function returned.
+  function functionOutput(raw) {
+    let body = decode(raw);
+    for (let i = 0; i < 3 && body && typeof body === 'object'; i += 1) {
+      if (Object.prototype.hasOwnProperty.call(body, 'ok')) return body;
+      const details = body.details;
+      if (details && typeof details === 'object' && Object.prototype.hasOwnProperty.call(details, 'output')) {
+        body = decode(details.output);
+        continue;
+      }
+      break;
     }
-    if (status >= 400 || isErrorBody(data)) throw providerError(data, status || 400);
-    return data;
-  }
-
-  // A rejected ZOHO.CRM.HTTP call can carry the provider body in err.data, in err.message, or be the body itself.
-  function errorFromRejection(err) {
-    for (const candidate of [err && err.data, err && err.message, err]) {
-      if (candidate == null || candidate === '') continue;
-      try { parseResponse(candidate); } catch (parsed) { return parsed; }
-    }
-    return new Error(errorText(err));
-  }
-
-  function providerError(data, status) {
-    const err = new Error(messageOf(data, status));
-    err.status = status;
-    err.type = (data && data.error && data.error.type) || '';
-    err.requestId = (data && data.request_id) || '';
-    return err;
+    return body;
   }
 
   function errorText(err) {
-    if (!err) return 'Zoho could not reach the AI provider.';
-    if (typeof err === 'string') return err.slice(0, 400);
-    if (typeof err.message === 'string' && err.message && err.message !== '[object Object]') return err.message.slice(0, 400);
-    return err.code ? String(err.code) : 'Zoho could not reach the AI provider.';
+    if (!err) return '';
+    if (typeof err === 'string') return err.slice(0, 300);
+    if (typeof err.message === 'string' && err.message && err.message !== '[object Object]') {
+      return `${err.code ? `${err.code}: ` : ''}${err.message}`.slice(0, 300);
+    }
+    try { return JSON.stringify(err).slice(0, 300); } catch (_) { return String(err); }
   }
 
-  async function http(method, url, headers, body) {
-    const api = typeof ZOHO !== 'undefined' && ZOHO.CRM && ZOHO.CRM.HTTP;
-    const fn = api && api[method];
-    if (!fn) throw new Error('Open the widget inside Zoho CRM. The AI provider is called through the Zoho HTTP API.');
-    const req = { url, headers: headers || {} };
-    if (body !== undefined) {
-      let payload = body;
-      if (/api\.anthropic\.com/i.test(url) && payload && typeof payload === 'object') {
-        const strip = (obj) => {
-          if (!obj || typeof obj !== 'object') return obj;
-          if (Array.isArray(obj)) return obj.map(strip);
-          const next = { ...obj };
-          delete next.temperature;
-          delete next.top_p;
-          delete next.top_k;
-          if (next.params && typeof next.params === 'object') next.params = strip(next.params);
-          if (Array.isArray(next.requests)) next.requests = next.requests.map(strip);
-          return next;
-        };
-        payload = strip(payload);
-      }
-      req.body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  function codedError(code, message, extra) {
+    const err = new Error(message);
+    err.code = code;
+    return Object.assign(err, extra || {});
+  }
+
+  function functionUnavailable(name, detail) {
+    return codedError('FUNCTION_UNAVAILABLE',
+      `The CRM function ${name} could not run${detail ? ` (${detail})` : ''}. An administrator can fix this with Install on the Living Docs setup page.`,
+      { fn: name });
+  }
+
+  // Deluge stops a function whose invokeurl waits too long for the provider. Nothing is wrong with the setup,
+  // so this is retried like a network error instead of sending the admin to Install.
+  const CRM_TIMEOUT_RE = /taking too long to respond|execution time.*exceed|timed? ?out|did not answer within/i;
+
+  function crmTimeout(name) {
+    return codedError('CRM_TIMEOUT', `The AI provider took longer to answer than Zoho lets ${name} wait. Trying again usually works; a faster model also helps.`, { fn: name });
+  }
+
+  function crmFunctionsAvailable() {
+    return typeof ZOHO !== 'undefined' && !!(ZOHO.CRM && ZOHO.CRM.FUNCTIONS && ZOHO.CRM.FUNCTIONS.execute);
+  }
+
+  // Runs as the signed-in user (not as the connection owner), so the save function can check the caller's profile.
+  async function runFunction(name, payload, timeoutMs = 90000) {
+    if (!crmFunctionsAvailable()) {
+      throw codedError('NOT_IN_CRM', 'Open the widget inside Zoho CRM. AI requests run through a CRM function.');
     }
     let raw;
     try {
-      raw = await fn(req);
+      raw = await withTimeout(ZOHO.CRM.FUNCTIONS.execute(name, { arguments: JSON.stringify({ payload: JSON.stringify(payload) }) }), timeoutMs, name);
     } catch (err) {
-      throw errorFromRejection(err);
+      const text = errorText(err);
+      throw CRM_TIMEOUT_RE.test(text) ? crmTimeout(name) : functionUnavailable(name, text);
     }
-    return parseResponse(raw);
+    const body = functionOutput(raw);
+    if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'ok')) return body;
+    const code = body && (body.code || body.status);
+    const detail = body && body.message ? `${code ? `${code}: ` : ''}${body.message}` : JSON.stringify(body || {}).slice(0, 200);
+    if (CRM_TIMEOUT_RE.test(detail)) throw crmTimeout(name);
+    throw functionUnavailable(name, detail);
+  }
+
+  // Gateway error codes -> the error types the retry logic and the screens already understand.
+  const GATEWAY_ERROR_TYPES = {
+    KEY_REJECTED: 'authentication_error',
+    PERMISSION: 'permission_error',
+    BILLING: 'billing_error',
+    NOT_FOUND: 'not_found_error',
+    TOO_LARGE: 'request_too_large',
+    INPUT_TOO_LARGE: 'request_too_large',
+    WORKSPACE_REQUIRED: 'workspace_required',
+    RATE_LIMITED: 'rate_limit_error',
+    OVERLOADED: 'overloaded_error'
+  };
+
+  function gatewayMessage(code, error, provider) {
+    const label = (PROVIDERS[provider] || {}).label || 'The AI provider';
+    const said = error.message ? ` ${label} said: ${error.message}` : '';
+    switch (code) {
+      case 'KEY_REJECTED': return provider === 'cursor'
+        ? 'Cursor rejected the API key. Create a user API key at cursor.com/dashboard/api and save it again on the setup page.'
+        : 'Anthropic rejected the API key. Check the key in the Anthropic console, then save it again on the setup page.';
+      case 'WORKSPACE_REQUIRED': return 'This Claude API key is not scoped to a workspace. Enter the Claude workspace ID (Anthropic console, Settings, Workspaces; it starts with wrkspc_), or create the key inside one workspace.';
+      case 'BILLING': return 'Your Anthropic account has no credit left. Add credit under Billing in the Anthropic console.';
+      case 'NOT_FOUND': return `${label} could not find that model. Check the model name.${said}`;
+      case 'TOO_LARGE': return `The request is too large for ${label}. Select fewer workflows or shorter functions.`;
+      case 'RATE_LIMITED': return `${label} rate limit reached. Wait a minute and try again.`;
+      case 'OVERLOADED': return `${label} is busy right now. Try again in a few minutes.`;
+      case 'PERMISSION': return `The ${label} API key is not allowed to do this.${said}`;
+      case 'PROVIDER_ERROR': return error.message ? `${label}: ${error.message}` : `${label} returned an error (HTTP ${error.status || '?'}).`;
+      default: return error.message || code;
+    }
+  }
+
+  async function gateway(payload, timeoutMs) {
+    const body = await runFunction(FN.GATEWAY_FN, payload, timeoutMs);
+    if (body.ok) return body;
+    const error = body.error || {};
+    const code = error.code || 'GATEWAY_ERROR';
+    throw codedError(code, gatewayMessage(code, error, payload.provider), {
+      type: GATEWAY_ERROR_TYPES[code] || '',
+      status: error.status || 0,
+      keyStatus: body.keyStatus || ''
+    });
   }
 
   // ---------- Secret redaction ----------
@@ -174,335 +221,172 @@
     return out;
   }
 
-  // ---------- Claude ----------
-  const ANTHROPIC_RETRY_TYPES = new Set(['rate_limit_error', 'overloaded_error', 'api_error']);
-  const ANTHROPIC_RETRY_STATUS = new Set([429, 500, 502, 503, 529]);
-  const ANTHROPIC_RETRIES = 3;
-  // x-api-key is sent first. Keys that are only accepted as Authorization: Bearer are remembered here.
-  const bearerAuthKeys = new Set();
 
-  function workspaceIdOf(cfg) {
-    const id = String(cfg.workspaceId || '').trim();
-    if (id && !/^wrkspc_[A-Za-z0-9]+$/.test(id)) {
-      throw new Error('The Claude workspace ID should look like wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ. Copy it from the Anthropic console under Settings, Workspaces.');
-    }
-    return id;
-  }
-
-  function anthropicHeaders(cfg, bearer) {
-    const headers = {
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json'
-    };
-    if (bearer) headers.Authorization = `Bearer ${cfg.apiKey}`;
-    else headers['x-api-key'] = cfg.apiKey;
-    const workspace = workspaceIdOf(cfg);
-    if (workspace) headers['anthropic-workspace-id'] = workspace;
-    return headers;
-  }
-
-  function anthropicError(err, cfg) {
-    const msg = err.message || '';
-    const ref = err.requestId ? ` (request ${err.requestId})` : '';
-    const workspace = cfg && String(cfg.workspaceId || '').trim();
-    let text = '';
-    if (/anthropic-workspace-id|not scoped to a workspace/i.test(msg)) {
-      text = workspace
-        ? `The workspace ID ${workspace} was sent, but Anthropic did not receive it. The Zoho HTTP proxy may be dropping the anthropic-workspace-id header. Create a Claude API key inside one workspace (Anthropic console, Settings, Workspaces, then API keys) and use that key instead.`
-        : 'This Claude API key is not scoped to a workspace, so Anthropic needs the workspace ID. Open Settings (or Edit settings on the verify page), enter the Claude workspace ID (Anthropic console, Settings, Workspaces; it starts with wrkspc_), then Test connection. Or create the key inside a single workspace.';
-      const out = new Error(text + ref);
-      out.status = err.status;
-      out.type = 'workspace_required';
-      return out;
-    } else if (err.type === 'authentication_error' || err.status === 401 || /invalid x-api-key/i.test(msg)) {
-      text = 'Anthropic rejected the API key. Check the key in the Anthropic console, or whether it has expired.';
-    } else if (err.type === 'permission_error' || err.status === 403) {
-      text = `The Claude API key is not allowed to do this: ${msg}`;
-    } else if (err.type === 'not_found_error' || err.status === 404) {
-      text = `Anthropic could not find that resource. Check the model name and API URL. ${msg}`;
-    } else if (err.type === 'request_too_large' || err.status === 413) {
-      text = 'The request is too large for Claude. Select fewer workflows or shorter functions.';
-    } else if (err.type === 'rate_limit_error' || err.status === 429) {
-      text = 'Claude rate limit reached. Wait a minute and try again, or raise the limit in the Anthropic console.';
-    } else if (err.type === 'overloaded_error' || err.status === 529) {
-      text = 'Claude is overloaded right now. Try again in a few minutes.';
-    } else if (err.type === 'billing_error' || /credit balance/i.test(msg)) {
-      text = 'Your Anthropic account has no credit left. Add credit under Billing in the Anthropic console.';
-    }
-    if (!text) return err;
-    const out = new Error(text + ref);
-    out.status = err.status;
-    out.type = err.type;
-    return out;
-  }
-
-  function isRetryable(err) {
-    return ANTHROPIC_RETRY_TYPES.has(err.type) || ANTHROPIC_RETRY_STATUS.has(err.status);
-  }
-
-  async function anthropicRequest(cfg, method, url, body) {
-    let bearer = bearerAuthKeys.has(cfg.apiKey);
-    let switched = false;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const data = await http(method, url, anthropicHeaders(cfg, bearer), body);
-        if (switched && bearer) bearerAuthKeys.add(cfg.apiKey);
-        else if (switched) bearerAuthKeys.delete(cfg.apiKey);
-        return data;
-      } catch (err) {
-        if (!switched && (err.type === 'authentication_error' || err.status === 401)) {
-          bearer = !bearer;
-          switched = true;
-          attempt -= 1;
-          continue;
-        }
-        if (attempt < ANTHROPIC_RETRIES && isRetryable(err)) {
-          await sleep(2000 * 2 ** attempt);
-          continue;
-        }
-        throw anthropicError(err, cfg);
-      }
-    }
-  }
-
-  // GET /v1/models lives next to /v1/messages. It pages with after_id / has_more / last_id.
-  function anthropicModelsUrl(cfg) {
-    const base = String(cfg.apiUrl || PROVIDERS.anthropic.apiUrl).replace(/\/+$/, '');
-    return /\/messages$/.test(base) ? base.replace(/\/messages$/, '/models') : `${base.replace(/\/v1$/, '')}/v1/models`;
-  }
-
-  async function anthropicModels(cfg) {
-    const models = [];
-    let after = '';
-    for (let page = 0; page < 5; page += 1) {
-      const query = `?limit=100${after ? `&after_id=${encodeURIComponent(after)}` : ''}`;
-      const data = await anthropicRequest(cfg, 'get', `${anthropicModelsUrl(cfg)}${query}`);
-      (data.data || []).forEach(m => models.push({ id: m.id, displayName: m.display_name || m.id }));
-      if (!data.has_more || !data.last_id) break;
-      after = data.last_id;
-    }
-    return models;
-  }
-
-  function anthropicMessage(data, cfg) {
-    const message = data && data.type === 'message_batch_result' ? data.message : data;
-    return {
-      text: textOf((message && message.content) || []),
-      model: (message && message.model) || cfg.model,
-      stopReason: (message && message.stop_reason) || '',
-      tokens_in: message && message.usage ? message.usage.input_tokens || 0 : 0,
-      tokens_out: message && message.usage ? message.usage.output_tokens || 0 : 0
-    };
-  }
-
-  // Short calls (connection test) go straight to /v1/messages.
-  async function callAnthropicDirect(cfg, params) {
-    const data = await anthropicRequest(cfg, 'post', cfg.apiUrl || PROVIDERS.anthropic.apiUrl, params);
-    return anthropicMessage(data, cfg);
-  }
-
-  function anthropicBatchesUrl(cfg) {
-    const base = String(cfg.apiUrl || PROVIDERS.anthropic.apiUrl).replace(/\/+$/, '');
-    return /\/messages$/.test(base) ? `${base}/batches` : `${base.replace(/\/v1$/, '')}/v1/messages/batches`;
-  }
-
-  // The results file is JSONL: one {custom_id, result} object per line.
-  function batchResultOf(data, customId) {
-    const rows = [];
-    if (data && data.result) rows.push(data);
-    else if (data && typeof (data.raw || data.message) === 'string') {
-      (data.raw || data.message).split('\n').forEach(line => { try { rows.push(JSON.parse(line)); } catch (_) { /* partial line */ } });
-    }
-    return rows.find(r => r.custom_id === customId) || rows[0] || null;
-  }
-
-  // Long calls run as a one-request Message Batch and are polled like a Cursor run, so no single
-  // Zoho HTTP call has to stay open while Claude writes the reply.
-  async function callAnthropicBatch(cfg, params) {
-    const customId = `living-docs-${Date.now()}`;
-    const url = anthropicBatchesUrl(cfg);
-    let batch = await anthropicRequest(cfg, 'post', url, { requests: [{ custom_id: customId, params }] });
-    if (!batch || !batch.id) throw new Error('Claude did not accept the request.');
-    const started = Date.now();
-    while (batch.processing_status !== 'ended') {
-      if (Date.now() - started > CURSOR_TIMEOUT_MS) {
-        await anthropicRequest(cfg, 'post', `${url}/${batch.id}/cancel`, {}).catch(() => null);
-        throw new Error('Claude did not finish within 8 minutes. Try again, or pick a faster model.');
-      }
-      await sleep(CURSOR_POLL_MS);
-      batch = await anthropicRequest(cfg, 'get', `${url}/${batch.id}`);
-    }
-    const raw = await anthropicRequest(cfg, 'get', batch.results_url || `${url}/${batch.id}/results`);
-    const row = batchResultOf(raw, customId);
-    const result = row && row.result;
-    if (!result) {
-      const seen = typeof raw === 'string' ? raw : JSON.stringify(raw || {});
-      throw new Error(`Claude finished (batch ${batch.id}) but Zoho returned a result the widget could not read: ${String(seen).slice(0, 160)}`);
-    }
-    if (result.type === 'errored') {
-      const data = result.error && result.error.error ? result.error : { error: result.error || { message: 'Claude returned an error.' } };
-      throw anthropicError(providerError(data, 400), cfg);
-    }
-    if (result.type === 'expired') throw new Error('Claude could not start the request in time (batch expired). Try again later.');
-    if (result.type !== 'succeeded') throw new Error(`Claude request ended as ${result.type}.`);
-    return anthropicMessage(result.message, cfg);
-  }
-
-  // Messages API body (POST /v1/messages). The same params go into a batch request when the direct call fails.
-  // No temperature / top_p / top_k: newer Claude models reject them ("`temperature` is deprecated for this model").
-  function claudeRequest(cfg, { system, user, maxTokens }) {
-    const params = {
-      model: cfg.model,
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: user }]
-    };
-    if (system) params.system = system;
-    return params;
-  }
-
-  async function callAnthropic(cfg, args) {
-    const { maxTokens } = args;
-    const params = claudeRequest(cfg, args);
-    let result;
-    try {
-      result = await callAnthropicDirect(cfg, params);
-    } catch (err) {
-      if (maxTokens <= 1000 || isProviderAnswer(err)) throw err;
-      result = null;
-    }
-    // A long reply can outlast the Zoho HTTP call and come back empty; the batch path polls instead.
-    if (maxTokens > 1000 && (!result || !result.text.trim())) result = await callAnthropicBatch(cfg, params);
-    if (!result.text.trim()) {
-      throw new Error(`Claude finished but the reply was empty${result.stopReason ? ` (stop reason: ${result.stopReason})` : ''}.`);
-    }
-    return result;
-  }
-
-  // Anthropic itself answered (bad key, workspace, model, billing, size...), so trying another endpoint will not help.
-  function isProviderAnswer(err) {
-    if (!err) return false;
-    if (err.type === 'workspace_required') return true;
-    if (err.type && !['api_error', 'overloaded_error', 'rate_limit_error'].includes(err.type)) return true;
-    return err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
-  }
-
-  // ---------- Cursor ----------
-  const CURSOR_TIMEOUT_MS = 8 * 60 * 1000;
-  const CURSOR_POLL_MS = 2000;
-  const CURSOR_TERMINAL = new Set(['FINISHED', 'ERROR', 'CANCELLED', 'EXPIRED']);
+  // ---------- Generation through the gateway ----------
+  // Claude: direct Messages API calls, each one short enough to finish inside Zoho's invokeurl time limit.
+  // When a call stops at max_tokens, the next call sends the text so far and Claude carries on from there.
+  // Cursor runs as a cloud agent and is polled.
+  const MAX_OUTPUT_TOKENS = 64000;
+  const CHUNK_START = 2000;
+  const CHUNK_MIN = 400;
+  const CHUNK_MAX = 6000;
+  // Aim each call at this many milliseconds, well below the Deluge limit, using the speed measured so far.
+  const CHUNK_TARGET_MS = 22000;
+  const POLL_MS = 3000;
+  const POLL_TIMEOUT_MS = 8 * 60 * 1000;
+  const POLL_ERRORS_ALLOWED = 3;
+  const SHORT_ANSWER_RETRIES = 3;
   // A cloud agent explores its workspace unless told not to; everything it needs is in this prompt.
   const CURSOR_TEXT_ONLY = `Answer straight away from the text below. Everything you need is in this message.
 Do not use any tools: do not read or search files, do not run commands, do not browse, do not create files, and do not open a pull request.
 Reply with the complete answer in your final message. That message is the only output the caller can read, so it must contain the full answer and nothing else.`;
 
-  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-  function cursorBase(cfg) {
-    return String(cfg.apiUrl || PROVIDERS.cursor.apiUrl).replace(/\/+$/, '').replace(/\/v[01]$/, '');
+  function providerFields(cfg) {
+    return { provider: cfg.provider, model: cfg.model || '', workspaceId: cfg.provider === 'anthropic' ? String(cfg.workspaceId || '').trim() : '' };
   }
 
-  function cursorHeaders(cfg, withBody) {
-    const headers = { Authorization: `Basic ${btoa(`${cfg.apiKey}:`)}`, Accept: 'application/json' };
-    if (withBody) headers['Content-Type'] = 'application/json';
-    return headers;
-  }
-
-  async function cursorRequest(cfg, method, pathname, body) {
-    try {
-      return await http(method, `${cursorBase(cfg)}${pathname}`, cursorHeaders(cfg, body !== undefined), body);
-    } catch (err) {
-      if (err.status === 401 || err.status === 403 || /unauthori[sz]ed|invalid api key/i.test(err.message)) {
-        throw new Error('Cursor rejected the API key. Create a user API key at cursor.com/dashboard/api.');
-      }
-      throw err;
+  function answerOf(res, cfg) {
+    const text = String(res.text || '');
+    if (!text.trim()) {
+      throw new Error(`${cfg.label || PROVIDERS[cfg.provider].label} finished but the reply was empty${res.stopReason ? ` (stop reason: ${res.stopReason})` : ''}.`);
     }
-  }
-
-  function textOf(value) {
-    if (typeof value === 'string') return value;
-    if (Array.isArray(value)) return value.map(textOf).join('');
-    if (value && typeof value === 'object') {
-      if (typeof value.text === 'string') return value.text;
-      if (typeof value.content === 'string' || Array.isArray(value.content)) return textOf(value.content);
-      if (typeof value.message === 'string') return value.message;
-    }
-    return '';
-  }
-
-  // Cloud Agents API body (POST /v1/agents). Cursor has no separate system field, so the rules lead the prompt.
-  function cursorAgentRequest(cfg, { system, user, maxTokens }) {
-    const limit = maxTokens ? `Keep the reply within about ${Math.round(maxTokens * 0.7)} words.` : '';
     return {
-      prompt: { text: [CURSOR_TEXT_ONLY, limit, system, user].filter(Boolean).join('\n\n') },
-      ...(cfg.model ? { model: { id: cfg.model } } : {}),
-      name: 'Living Docs request',
-      mode: 'agent'
+      text,
+      model: res.model || cfg.model,
+      stopReason: res.stopReason || '',
+      tokens_in: Number(res.tokensIn || 0),
+      tokens_out: Number(res.tokensOut || 0)
     };
   }
 
-  async function callCursor(cfg, args) {
-    const created = await cursorRequest(cfg, 'post', '/v1/agents', cursorAgentRequest(cfg, args));
-    const agentId = created && created.agent && created.agent.id;
-    let run = created && created.run;
-    if (!agentId || !run || !run.id) throw new Error('Cursor did not return an agent run.');
-    const started = Date.now();
-    try {
-      while (!CURSOR_TERMINAL.has(String(run.status || '').toUpperCase())) {
-        if (Date.now() - started > CURSOR_TIMEOUT_MS) {
-          await cursorRequest(cfg, 'post', `/v1/agents/${agentId}/runs/${run.id}/cancel`, {}).catch(() => null);
-          throw new Error('Cursor did not finish within 8 minutes.');
-        }
-        await sleep(CURSOR_POLL_MS);
-        run = await cursorRequest(cfg, 'get', `/v1/agents/${agentId}/runs/${run.id}`);
+  function newRequestId() {
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Zoho can stop the start call while Cursor is still creating the agent. The agent carries the request ID
+  // in its name, so it is looked up for a while instead of starting (and paying for) a second run.
+  const FIND_TRIES = 12;
+  const FIND_MS = 5000;
+
+  async function findStartedJob(fields, requestId) {
+    for (let i = 0; i < FIND_TRIES; i += 1) {
+      await sleep(FIND_MS);
+      try {
+        const res = await gateway({ action: 'find', ...fields, requestId });
+        if (res.found && res.job) return res.job;
+      } catch (err) {
+        if (needsUserAction(err)) throw err;
       }
-      const status = String(run.status).toUpperCase();
-      if (status !== 'FINISHED') throw new Error(`Cursor run ended with status ${status}.`);
-      let text = textOf(run.result);
-      // The final message is sometimes attached a moment after the run reports FINISHED.
-      for (let i = 0; i < 3 && text.trim().length < 200; i += 1) {
-        await sleep(1000);
-        const again = await cursorRequest(cfg, 'get', `/v1/agents/${agentId}/runs/${run.id}`);
-        const latest = textOf(again.result);
-        if (latest.trim().length > text.trim().length) text = latest;
-      }
-      if (!text.trim()) throw new Error('Cursor finished the run but the reply was empty.');
-      return { text, model: cfg.model || 'default', tokens_in: 0, tokens_out: 0 };
-    } finally {
-      cursorRequest(cfg, 'delete', `/v1/agents/${agentId}`).catch(() => null);
     }
+    return null;
   }
 
-  async function cursorModels(cfg) {
-    const data = await cursorRequest(cfg, 'get', '/v1/models');
-    return (data.items || []).map(m => ({ id: m.id, displayName: m.displayName || m.id, aliases: m.aliases || [] }));
+  async function generateClaude(cfg, args, onProgress) {
+    const fields = providerFields(cfg);
+    let text = '';
+    let chunk = CHUNK_START;
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let model = cfg.model;
+    let stopReason = '';
+    let pieceRetries = 0;
+    // Lowered whenever Zoho cuts a call off, so the speed estimate never asks for that much again.
+    let ceiling = CHUNK_MAX;
+    while (tokensOut < MAX_OUTPUT_TOKENS) {
+      let res;
+      try {
+        res = await gateway({ action: 'start', ...fields, system: args.system, user: args.user, partial: text, maxTokens: chunk });
+      } catch (err) {
+        // Zoho stopped the call before Claude finished: ask for a shorter piece and try again.
+        if (err.code === 'CRM_TIMEOUT' && chunk > CHUNK_MIN) {
+          ceiling = Math.max(CHUNK_MIN, Math.floor(chunk * 0.75));
+          chunk = Math.max(CHUNK_MIN, Math.floor(chunk / 2));
+          continue;
+        }
+        // Once some text exists, a passing error is retried here so the text written so far is kept.
+        if (text && !needsUserAction(err) && pieceRetries < AI_RETRIES) {
+          pieceRetries += 1;
+          await sleep(1500 * pieceRetries);
+          continue;
+        }
+        throw err;
+      }
+      pieceRetries = 0;
+      const piece = String(res.text || '');
+      const out = Number(res.tokensOut || 0);
+      text += piece;
+      tokensIn += Number(res.tokensIn || 0);
+      tokensOut += out;
+      model = res.model || model;
+      stopReason = res.stopReason || '';
+      if (onProgress && piece) onProgress({ text, tokensOut });
+      if (stopReason !== 'max_tokens' || !piece) break;
+      const ms = Number(res.latencyMs || 0);
+      if (out > 0 && ms > 0) chunk = Math.round(Math.min(ceiling, Math.max(CHUNK_MIN, (out / ms) * CHUNK_TARGET_MS)));
+    }
+    return answerOf({ text, model, stopReason, tokensIn, tokensOut }, cfg);
   }
 
-  // Models the key can use, straight from the provider.
-  function listModels(cfg) {
-    if (!cfg || !cfg.apiKey) return Promise.resolve([]);
-    return cfg.provider === 'cursor' ? cursorModels(cfg) : anthropicModels(cfg);
+  async function generate(cfg, args, onProgress) {
+    if (cfg.provider === 'anthropic') return generateClaude(cfg, args, onProgress);
+    const fields = providerFields(cfg);
+    const label = cfg.label || PROVIDERS[cfg.provider].label;
+    const requestId = newRequestId();
+    let first;
+    try {
+      first = await gateway({ action: 'start', ...fields, ...args, requestId });
+    } catch (err) {
+      if (err.code !== 'CRM_TIMEOUT' || cfg.provider !== 'cursor') throw err;
+      const found = await findStartedJob(fields, requestId);
+      if (!found) throw codedError('CRM_TIMEOUT', `${label} did not confirm the request before Zoho stopped the call. Try again.`);
+      first = { done: false, job: found };
+    }
+    if (first.done) return answerOf(first, cfg);
+    const job = first.job;
+    if (!job) throw new Error(`${label} did not accept the request.`);
+    const started = Date.now();
+    let pollErrors = 0;
+    let shortAnswers = 0;
+    for (;;) {
+      if (Date.now() - started > POLL_TIMEOUT_MS) {
+        gateway({ action: 'cancel', ...fields, job }).catch(() => null);
+        throw new Error(`${label} did not finish within 8 minutes. Try again, or pick a faster model.`);
+      }
+      await sleep(POLL_MS);
+      let poll;
+      try {
+        poll = await gateway({ action: 'poll', ...fields, job, acceptShort: shortAnswers >= SHORT_ANSWER_RETRIES });
+      } catch (err) {
+        pollErrors += 1;
+        if (needsUserAction(err) || pollErrors > POLL_ERRORS_ALLOWED) throw err;
+        continue;
+      }
+      if (poll.done) return answerOf(poll, cfg);
+      if (poll.status === 'FINALIZING') shortAnswers += 1;
+    }
   }
 
   // ---------- Public calls ----------
   function checkConfig(cfg) {
     if (!cfg || !PROVIDERS[cfg.provider]) throw new Error('Choose Claude or Cursor first.');
-    if (!cfg.apiKey) throw new Error('Enter the API key.');
     if (!cfg.model) throw new Error('Enter the model.');
   }
 
   // A failed AI call is retried quietly 3 times. Nothing reaches the screen until all 3 have failed.
-  // Errors only the user can fix (key, workspace, billing, model name) are shown at once.
+  // Errors only the user can fix (key, workspace, billing, model name, setup) are shown at once.
   const AI_RETRIES = 3;
+  const USER_ACTION_CODES = new Set([
+    'KEY_NOT_SET', 'KEY_UNREADABLE', 'KEY_REJECTED', 'NOT_DEPLOYED', 'FUNCTION_UNAVAILABLE', 'NOT_IN_CRM', 'DAILY_LIMIT',
+    'USAGE_NOT_RECORDED', 'BAD_WORKSPACE', 'INVALID_MODEL', 'UNSUPPORTED_PROVIDER', 'NOT_ALLOWED', 'INPUT_TOO_LARGE', 'BAD_REQUEST'
+  ]);
 
   function needsUserAction(err) {
     const type = (err && err.type) || '';
     if (['workspace_required', 'authentication_error', 'permission_error', 'billing_error', 'not_found_error', 'request_too_large'].includes(type)) return true;
-    return /rejected the API key|workspace ID|no credit|not available for this key|Choose Claude or Cursor|Enter the API key|Enter the model|Open the widget inside Zoho/i.test((err && err.message) || '');
-  }
-
-  function isSamplingRejected(err) {
-    return /\b(temperature|top_p|top_k)\b/i.test((err && err.message) || '')
-      && /deprecated|not supported|unsupported|not allowed|cannot|invalid/i.test(err.message || '');
+    if (err && USER_ACTION_CODES.has(err.code)) return true;
+    return /Choose Claude or Cursor|Enter the model|Open the widget inside Zoho/i.test((err && err.message) || '');
   }
 
   async function withAiRetries(call) {
@@ -514,20 +398,24 @@ Reply with the complete answer in your final message. That message is the only o
         lastErr = err;
         if (needsUserAction(err) || attempt === AI_RETRIES) throw err;
         console.warn(`[Living Docs AI] attempt ${attempt} failed, retrying (${AI_RETRIES - attempt} left):`, err.message || err);
-        await sleep(isSamplingRejected(err) ? 400 : 1200 * attempt);
+        await sleep(1500 * attempt);
       }
     }
     throw lastErr;
   }
 
   // restore: put redacted originals back into the answer (used for code, so the function still works).
-  async function callAi(cfg, { system = '', user = '', maxTokens = 8000, restore = false } = {}) {
+  // No length cap: Claude writes until it is done (up to MAX_OUTPUT_TOKENS). onProgress gets the text so far.
+  async function callAi(cfg, { system = '', user = '', restore = false, onProgress = null } = {}) {
     checkConfig(cfg);
     const map = new Map();
     const safeSystem = redactSecrets(system, map);
     const safeUser = redactSecrets(user, map);
-    const args = { system: safeSystem.text, user: safeUser.text, maxTokens };
-    const result = await withAiRetries(() => (cfg.provider === 'cursor' ? callCursor(cfg, args) : callAnthropic(cfg, args)));
+    let systemText = safeSystem.text;
+    if (cfg.provider === 'cursor') systemText = [CURSOR_TEXT_ONLY, systemText].filter(Boolean).join('\n\n');
+    const args = { system: systemText, user: safeUser.text };
+    const progress = onProgress ? ({ text, tokensOut }) => onProgress({ text: restore ? restoreRedacted(text, map) : text, tokensOut }) : null;
+    const result = await withAiRetries(() => generate(cfg, args, progress));
     return {
       ...result,
       text: restore ? restoreRedacted(result.text, map) : result.text,
@@ -537,28 +425,63 @@ Reply with the complete answer in your final message. That message is the only o
     };
   }
 
+  // Models the saved key can use, straight from the provider.
+  async function listModels(cfg) {
+    if (!cfg || !PROVIDERS[cfg.provider]) return [];
+    const res = await gateway({ action: 'models', ...providerFields(cfg) });
+    return (res.models || []).map(m => ({ id: m.id, displayName: m.displayName || m.id, aliases: m.aliases || [] }));
+  }
+
+  // Uses the key already saved in CRM. Setup saves a newly typed key before it calls this.
   async function testConnection(cfg) {
     checkConfig(cfg);
     const started = Date.now();
     const label = cfg.label || PROVIDERS[cfg.provider].label;
+    const res = await gateway({ action: 'test', ...providerFields(cfg) });
+    let models = [];
     if (cfg.provider === 'cursor') {
-      const me = await cursorRequest(cfg, 'get', '/v1/me');
-      const models = await cursorModels(cfg).catch(() => null);
-      if (models && models.length && !models.some(m => m.id === cfg.model || m.aliases.includes(cfg.model))) {
-        throw new Error(`Model "${cfg.model}" is not available for this key. Available: ${models.map(m => m.id).slice(0, 12).join(', ')}`);
+      models = await listModels(cfg).catch(() => []);
+      if (models.length && !models.some(m => m.id === cfg.model || m.aliases.includes(cfg.model))) {
+        throw codedError('INVALID_MODEL', `Model "${cfg.model}" is not available for this key. Available: ${models.map(m => m.id).slice(0, 12).join(', ')}`);
       }
-      return { label, model: cfg.model, account: me.userEmail || me.apiKeyName || 'Cursor API key', models: models || [], ms: Date.now() - started };
     }
-    const result = await callAnthropic(cfg, {
-      system: 'You are a connection test. Reply with the single word OK.',
-      user: 'Reply with OK.',
-      maxTokens: 16
-    });
-    return { label, model: result.model, account: '', models: [], ms: Date.now() - started };
+    return { label, model: res.model || cfg.model, account: res.account || '', models, ms: Date.now() - started };
+  }
+
+  // { keyStatus: 'set' | 'not_set' | 'unreadable', keys: { anthropic: { set, hint }, cursor: { set, hint } }, secretTag }
+  async function keyStatus() {
+    const res = await gateway({ action: 'status' }, 30000);
+    return { keyStatus: res.keyStatus || 'not_set', keys: res.keys || {}, secretTag: res.secretTag || '', version: Number(res.version || 1) };
+  }
+
+  async function saveFunction(payload) {
+    const body = await runFunction(FN.SAVE_FN, payload, 60000);
+    if (body.ok) return { keys: body.keys || {}, secretTag: body.secretTag || '', readable: body.readable !== false };
+    const error = body.error || {};
+    throw codedError(error.code || 'SAVE_FAILED', error.message || 'The API key was not saved.');
+  }
+
+  // The key leaves the browser once, to the save function, and is not kept in widget state.
+  function saveApiKey(provider, key, apiDomain) {
+    return saveFunction({ action: 'save', provider, key, apiDomain });
+  }
+
+  function clearApiKey(provider, apiDomain) {
+    return saveFunction({ action: 'clear', provider: provider || '', apiDomain });
+  }
+
+  function checkSaveFunction() {
+    return saveFunction({ action: 'check' });
+  }
+
+  async function pingGateway() {
+    const res = await runFunction(FN.GATEWAY_FN, { action: 'ping' }, 30000);
+    return { ok: !!res.ok, secretTag: res.secretTag || '', version: Number(res.version || 1) };
   }
 
   // ---------- Documentation prompt ----------
-  const DOC_INPUT_CHAR_BUDGET = 120000;
+  // No input limit for now; the model's context window is the only cap.
+  const DOC_INPUT_CHAR_BUDGET = 5000000;
   const TRUNCATED = '[truncated to fit the model input limit]';
 
   const WORKFLOW_SYSTEM_PROMPT = `You are a senior Zoho CRM solution architect. You write operations documentation for workflow rules and the custom functions they call, for an administrator who has to maintain them.
@@ -656,8 +579,8 @@ RULES:
 
   // Output length sets the response time, so quick documents ask for less text and send less source.
   const DOC_MODES = {
-    quick: { maxTokens: 3000, inputChars: 60000 },
-    detailed: { maxTokens: 8000, inputChars: DOC_INPUT_CHAR_BUDGET }
+    quick: { maxTokens: MAX_OUTPUT_TOKENS, inputChars: DOC_INPUT_CHAR_BUDGET },
+    detailed: { maxTokens: MAX_OUTPUT_TOKENS, inputChars: DOC_INPUT_CHAR_BUDGET }
   };
 
   const QUICK_TASK = `# Task
@@ -771,12 +694,12 @@ CODE:
     return { code, summary };
   }
 
-  async function improveFunction(cfg, { fn, source, issues, placeholders }) {
+  async function improveFunction(cfg, { fn, source, issues, placeholders }, onProgress) {
     const result = await callAi(cfg, {
       system: IMPROVE_SYSTEM_PROMPT,
       user: buildImprovePrompt(fn, source, issues, placeholders),
-      maxTokens: 8000,
-      restore: true
+      restore: true,
+      onProgress
     });
     const parsed = parseImproveResponse(result.text || '');
     if (!parsed.code.trim()) throw new Error(`${result.label} did not return a code block.`);
@@ -784,6 +707,12 @@ CODE:
   }
 
   window.LivingDocsAI = {
+    keyStatus,
+    saveApiKey,
+    clearApiKey,
+    checkSaveFunction,
+    pingGateway,
+    needsUserAction,
     PROVIDERS,
     callAi,
     testConnection,

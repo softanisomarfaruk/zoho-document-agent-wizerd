@@ -523,64 +523,11 @@ textarea { font-family: var(--mono); font-size: 12px; line-height: 1.55; resize:
   .rd-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .static-doc h2 { font-size: 14px; margin: 16px 0 8px; }
+/* Flowchart: the SVG carries its own colours and fonts (see renderFlowchart). */
 .fc {
-  --arm: 156px;
-  --gap: 44px;
-  --half: calc((var(--arm) + var(--gap)) / 2);
-  display: flex; flex-direction: column; align-items: center;
-  background: #1b1e27; border-radius: 14px; padding: 16px 14px 12px; color: #f3f4f6; overflow-x: auto;
+  background: #ffffff; border: 1px solid var(--border); border-radius: 14px; padding: 14px 10px; overflow-x: auto;
 }
-.fc-step { display: flex; flex-direction: column; align-items: center; }
-.fc-cond {
-  background: #c2410c; color: #fff; border-radius: 8px;
-  padding: 6px 10px; text-align: center; width: 176px;
-}
-.fc-cond strong { display: block; font-size: 12.5px; line-height: 1.3; }
-.fc-cond span { display: block; margin-top: 1px; font-size: 11px; line-height: 1.3; opacity: .95; }
-.fc-neck { display: block; width: 1px; height: 12px; background: #9ca3af; }
-.fc-fork {
-  display: flex; align-items: stretch; gap: var(--gap); position: relative; padding-top: 14px;
-}
-.fc-fork::before {
-  content: ''; position: absolute; top: 0; left: calc(var(--arm) / 2); right: calc(var(--arm) / 2);
-  height: 1px; background: #9ca3af;
-}
-.fc-arm {
-  width: var(--arm); display: flex; flex-direction: column; align-items: center; position: relative;
-}
-.fc-arm::before {
-  content: ''; position: absolute; top: -14px; left: 50%; width: 1px; height: 14px; background: #9ca3af;
-}
-.fc-rail { flex: 1 1 auto; width: 1px; min-height: 10px; background: #9ca3af; }
-.fc-join-wrap { display: flex; justify-content: center; width: 100%; }
-.fc-join {
-  width: var(--half); height: 14px; margin-left: var(--half); box-sizing: border-box; position: relative;
-  border-right: 1px solid #9ca3af; border-bottom: 1px solid #9ca3af;
-}
-.fc-join::after {
-  content: ''; position: absolute; left: -4px; bottom: -6px;
-  border: 4px solid transparent; border-top-color: #9ca3af;
-}
-.fc-yn { font-size: 11px; font-weight: 700; line-height: 1; }
-.fc-yn.yes { color: #86efac; }
-.fc-yn.no { color: #d1d5db; }
-.fc-card {
-  width: var(--arm); background: #0f766e; color: #fff; border-radius: 8px; padding: 6px 8px; text-align: center;
-}
-.fc-card strong { display: block; font-size: 12px; line-height: 1.3; }
-.fc-card span { display: block; margin-top: 1px; font-size: 10.5px; opacity: .85; }
-.fc-pill {
-  display: inline-flex; align-items: center; justify-content: center; min-height: 26px; padding: 3px 10px;
-  border-radius: 999px; background: #3f4654; color: #f9fafb; border: 1px solid #6b7280;
-  font-size: 11px; font-weight: 650; text-align: center;
-}
-.fc-stem {
-  display: block; width: 1px; height: 12px; margin: 0 auto; background: #9ca3af; position: relative; flex: 0 0 auto;
-}
-.fc-stem::after {
-  content: ''; position: absolute; left: 50%; bottom: -1px; transform: translateX(-50%);
-  border: 4px solid transparent; border-top-color: #9ca3af;
-}
+.fc svg { display: block; width: 100%; min-width: 420px; max-width: 660px; height: auto; margin: 0 auto; }
 .crit-list { display: flex; flex-direction: column; gap: 10px; }
 .crit-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface); }
 .crit-head { display: flex; gap: 10px; align-items: flex-start; }
@@ -624,6 +571,11 @@ textarea { font-family: var(--mono); font-size: 12px; line-height: 1.55; resize:
 .doc-view.pdf-body table { font-size: 11px; }
 .doc-view.pdf-body tr, .doc-view.pdf-body pre, .doc-view.pdf-body blockquote { page-break-inside: avoid; break-inside: avoid; }
 .doc-view.pdf-body h2, .doc-view.pdf-body h3 { page-break-after: avoid; break-after: avoid; }
+.pdf-flow { margin: 0 0 16px; }
+.pdf-flow h2 { margin-top: 0; }
+.pdf-sheet .fc { overflow: visible; }
+.pdf-sheet .fc { page-break-inside: avoid; break-inside: avoid; }
+.pdf-sheet .fc svg { min-width: 0; }
 /* Module master document: one continuous flow. Only the workflow heading (h1) separates rules. No extra page gaps. */
 .pdf-sheet.compact .pdf-cover { margin: 0 0 6px; padding: 0 0 4px; border-bottom: 1px solid #cbd5e1; }
 .pdf-sheet.compact .pdf-brand { letter-spacing: 0.04em; font-size: 9px; }
@@ -736,6 +688,4 @@ textarea { font-family: var(--mono); font-size: 12px; line-height: 1.55; resize:
   .form-grid { grid-template-columns: 1fr; }
   .stepper .label { display: none; }
   .doc-view { padding: 20px; }
-  .fc-fork { flex-direction: column; gap: 16px; padding-top: 10px; }
-  .fc-fork::before, .fc-arm::before, .fc-join-wrap { display: none; }
 }

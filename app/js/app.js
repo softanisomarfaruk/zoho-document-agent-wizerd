@@ -18,7 +18,14 @@
     docDetail: localStorage.getItem('livingdocs.detail') === 'detailed' ? 'detailed' : 'quick',
     hasApiKey: false,
     ai: { provider: '', label: '', apiUrl: '', model: '', workspaceId: '', hasApiKey: false, keyHint: '', configured: false },
-    aiKeys: { anthropic: '', cursor: '' },
+    // What the gateway reports about the encrypted key store. The keys themselves never reach the widget.
+    aiKeyState: { anthropic: { set: false, hint: '' }, cursor: { set: false, hint: '' } },
+    keyStoreStatus: 'unknown',
+    // A key typed into setup waits here only until Install hands it to livingdocs_save_api_key.
+    pendingKeys: { anthropic: '', cursor: '' },
+    // Plain-text keys found on an older Living_Docs_Settings record; Install moves them and blanks the fields.
+    legacyKeys: { anthropic: '', cursor: '' },
+    clearLegacyKeys: false,
     aiProviders: {},
     docLog: null,
     currentUser: null,
@@ -44,6 +51,9 @@
 
   // Rules documented per run. Each gets its own prompt, AI call, PDF and CRM record, written in parallel.
   const MAX_BATCH = 3;
+
+  // Names and script builders of the two Deluge functions that hold the AI keys (ai-functions.js).
+  const LDF = window.LivingDocsFunctions;
 
   const dom = {};
 
@@ -350,32 +360,36 @@
     return /(^|\.)zappsusercontent\.com$|(^|\.)zappscontents\.com$/i.test(location.hostname || '');
   }
 
+  function keyInfo(provider) {
+    return (state.aiKeyState && state.aiKeyState[provider]) || { set: false, hint: '' };
+  }
+
+  function applyKeyState(keys) {
+    ['anthropic', 'cursor'].forEach((p) => {
+      const k = (keys && keys[p]) || {};
+      state.aiKeyState[p] = { set: k.set === true || k.set === 'true', hint: String(k.hint || '') };
+    });
+    refreshAiFromKeys();
+  }
+
   function refreshAiFromKeys() {
     const provider = state.ai.provider;
-    const key = (provider && state.aiKeys[provider]) || '';
+    const info = keyInfo(provider);
     const preset = AI_PROVIDER_DEFAULTS[provider] || {};
-    if (!state.ai.apiUrl && preset.apiUrl) state.ai.apiUrl = preset.apiUrl;
+    // The gateway only talks to the fixed provider hosts, so the URL always follows the preset.
+    if (preset.apiUrl && (preset.editableUrl === false || !state.ai.apiUrl)) state.ai.apiUrl = preset.apiUrl;
     if (!state.ai.model && preset.model) state.ai.model = preset.model;
     if (!state.ai.label && preset.label) state.ai.label = preset.label;
-    if (key) {
-      state.ai.hasApiKey = true;
-      state.ai.keyHint = key.slice(-4);
-      state.ai.configured = Boolean(provider && state.ai.apiUrl && state.ai.model);
-      state.hasApiKey = state.ai.configured;
-    } else if (state.clearAiKey) {
-      state.ai.hasApiKey = false;
-      state.ai.keyHint = '';
-      state.ai.configured = false;
-      state.hasApiKey = false;
-    }
+    state.ai.hasApiKey = Boolean(provider && info.set);
+    state.ai.keyHint = info.hint || '';
+    state.ai.configured = Boolean(provider && info.set && state.ai.model);
+    state.hasApiKey = state.ai.configured;
   }
 
   function applyRecordAi(record) {
     if (!record) return;
-    const claude = String(record.Claude_API_Key || '').trim();
-    const cursor = String(record.Cursor_API_Key || '').trim();
-    if (claude) state.aiKeys.anthropic = claude;
-    if (cursor) state.aiKeys.cursor = cursor;
+    state.legacyKeys.anthropic = String(record.Claude_API_Key || '').trim();
+    state.legacyKeys.cursor = String(record.Cursor_API_Key || '').trim();
     state.ai.workspaceId = String(record.Claude_Workspace_Id || '').trim();
     const [provider, label] = String(record.AI_Provider || '').split('|');
     if (provider) {
@@ -403,7 +417,9 @@
   function pickSettingsRecord(rows) {
     if (!Array.isArray(rows) || !rows.length) return null;
     const named = rows.filter(r => r.Name === 'agent_config_v1');
-    const pool = named.length ? named : rows;
+    // The gateway keeps its daily counter on the same module; it is never the settings row.
+    const pool = named.length ? named : rows.filter(r => r.Name !== window.LivingDocsFunctions.USAGE_RECORD);
+    if (!pool.length) return null;
     pool.sort((a, b) => new Date(b.Modified_Time || b.Created_Time || 0) - new Date(a.Modified_Time || a.Created_Time || 0));
     return pool[0];
   }
@@ -438,16 +454,16 @@
     return null;
   }
 
-  function saveSettingsRecord() {
+  function saveSettingsRecord(log) {
     return upsertSettingsRecord({
       docsAgentConnection: state.settings.docsAgentConnection,
       workdriveConnection: state.settings.workdriveConnection,
       workdriveFolder: state.settings.workdriveFolder,
       scheduleFrequency: state.settings.scheduleFrequency
-    });
+    }, log);
   }
 
-  async function upsertSettingsRecord(fields) {
+  async function upsertSettingsRecord(fields, log) {
     if (typeof ZOHO === 'undefined' || !ZOHO.CRM?.API) {
       return { ok: false, action: 'unavailable', message: 'Open the widget inside Zoho CRM to save settings.' };
     }
@@ -466,8 +482,6 @@
       AI_Provider: state.ai.provider ? `${state.ai.provider}|${state.ai.label || ''}` : '',
       AI_Model: state.ai.model || '',
       AI_API_URL: state.ai.apiUrl || '',
-      Claude_API_Key: state.aiKeys.anthropic || '',
-      Cursor_API_Key: state.aiKeys.cursor || '',
       Claude_Workspace_Id: state.ai.workspaceId || ''
     };
     if (fields.scheduleFrequency) APIData.Schedule_Frequency = fields.scheduleFrequency;
@@ -485,6 +499,13 @@
         APIData: data
       });
     };
+
+    if (canUseZohoConnection()) await removeLegacyKeyFields(log);
+    // Older installs kept the keys on this record. Blank a field only when it could not be deleted.
+    if (state.clearLegacyKeys) {
+      if (!state.removedSettingsKeyFields?.Claude_API_Key) APIData.Claude_API_Key = '';
+      if (!state.removedSettingsKeyFields?.Cursor_API_Key) APIData.Cursor_API_Key = '';
+    }
 
     // Zoho can drop values for fields the module does not have yet, so older installs get the new fields before the first write.
     if (!state.settingsFieldsEnsured && state.ai.workspaceId && canUseZohoConnection()) {
@@ -558,10 +579,11 @@
         { label: 'AI Provider', type: 'text', length: 100 },
         { label: 'AI Model', type: 'text', length: 120 },
         { label: 'AI API URL', type: 'text', length: 255 },
-        { label: 'Claude API Key', type: 'textarea', length: 2000, textarea: 'small' },
-        { label: 'Cursor API Key', type: 'textarea', length: 2000, textarea: 'small' },
         { label: 'Claude Workspace Id', type: 'text', length: 120 },
-        { label: 'Audience', type: 'text', length: 40 }
+        { label: 'Audience', type: 'text', length: 40 },
+        // Per-user daily request counter, written by livingdocs_llm_gateway.
+        { label: 'Usage JSON', type: 'textarea', length: 32000, textarea: 'large' }
+        // Claude API Key and Cursor API Key are not module fields. Keys stay in the encrypted Org Variable.
       ]
     },
     {
@@ -685,6 +707,104 @@
     }
     if (created) log(`${moduleApi}: added ${plural(created, 'field')}.`, 'ok');
     if (failed.length) log(`${moduleApi}: ${plural(failed.length, 'field')} not added: ${failed.join('; ')}`, 'warn');
+  }
+
+  const LEGACY_SETTINGS_KEY_FIELDS = [
+    { api: 'Claude_API_Key', provider: 'anthropic', label: 'Claude API Key' },
+    { api: 'Cursor_API_Key', provider: 'cursor', label: 'Cursor API Key' }
+  ];
+
+  async function listSettingsFields(moduleApi, type) {
+    const typeQuery = type ? `&type=${encodeURIComponent(type)}` : '';
+    const body = await crmGet(`/crm/v8/settings/fields?module=${encodeURIComponent(moduleApi)}${typeQuery}`, { timeoutMs: 15000 });
+    return Array.isArray(body.fields) ? body.fields : [];
+  }
+
+  function findLegacyKeyField(fields, spec) {
+    return fields.find((field) => {
+      const api = String(field.api_name || '').toLowerCase();
+      const label = String(field.field_label || field.display_label || '').toLowerCase();
+      return api === spec.api.toLowerCase() || label === spec.label.toLowerCase();
+    }) || null;
+  }
+
+  async function deleteCrmField(moduleApi, field) {
+    const endpoint = `/crm/v8/settings/fields/${encodeURIComponent(field.id)}?module=${encodeURIComponent(moduleApi)}`;
+    const resp = await withHardTimeout(invokeZohoConnectionAPI(conn(), {
+      endpoint,
+      method: 'DELETE'
+    }), 20000, `Delete ${field.api_name || field.field_label || field.id}`);
+    const row = (Array.isArray(resp?.fields) ? resp.fields[0] : null) || resp || {};
+    const apiErr = zohoApiError(resp) || zohoApiError(row);
+    if (apiErr) return { ok: false, message: apiErr.message || apiErr.code };
+    const ok = row.code === 'SUCCESS' || row.status === 'success';
+    return { ok, message: row.message || row.code || JSON.stringify(resp).slice(0, 180) };
+  }
+
+  // Removes Claude API Key and Cursor API Key from Living_Docs_Settings. A field that still holds the only
+  // copy of a key is left in place until that key is in the encrypted Org Variable.
+  async function removeLegacyKeyFields(log = () => {}) {
+    if (!canUseZohoConnection()) return;
+    if (!state.removedSettingsKeyFields) state.removedSettingsKeyFields = {};
+    const moduleApi = logModuleApi('settings');
+    let fields = [];
+    try {
+      fields = await listSettingsFields(moduleApi, 'all');
+    } catch (err) {
+      try {
+        fields = await listSettingsFields(moduleApi);
+      } catch (fallbackErr) {
+        log(`Could not read ${moduleApi} fields: ${fallbackErr.message || fallbackErr}`, 'warn');
+        return;
+      }
+    }
+    for (const spec of LEGACY_SETTINGS_KEY_FIELDS) {
+      if (state.removedSettingsKeyFields[spec.api]) continue;
+      const field = findLegacyKeyField(fields, spec);
+      if (!field) {
+        state.removedSettingsKeyFields[spec.api] = true;
+        continue;
+      }
+      if (field.custom_field === false) {
+        log(`${spec.label} is a system field on ${moduleApi}, so it was left in place.`, 'warn');
+        continue;
+      }
+      if (state.legacyKeys[spec.provider] && !keyInfo(spec.provider).set) {
+        log(`${spec.label} still holds the only copy of that key, so it stays on ${moduleApi} until the key is stored encrypted.`, 'warn');
+        continue;
+      }
+      if (!field.id) {
+        log(`${spec.label} has no field id, so it could not be removed.`, 'warn');
+        continue;
+      }
+      try {
+        const first = await deleteCrmField(moduleApi, field);
+        if (!first.ok) {
+          log(`${spec.label} was not removed: ${first.message}`, 'warn');
+          continue;
+        }
+        let unused;
+        try {
+          unused = await listSettingsFields(moduleApi, 'unused');
+        } catch (err) {
+          log(`${spec.label} left the layout. Unused fields could not be checked: ${err.message || err}`, 'warn');
+          continue;
+        }
+        const parked = findLegacyKeyField(unused, spec);
+        if (parked && parked.id) {
+          const second = await deleteCrmField(moduleApi, parked);
+          if (!second.ok) {
+            log(`${spec.label} was moved off the layout, but the unused field is still there: ${second.message}`, 'warn');
+            continue;
+          }
+        }
+        state.removedSettingsKeyFields[spec.api] = true;
+        state.legacyKeys[spec.provider] = '';
+        log(`Removed ${spec.label} from ${moduleApi}.`, 'ok');
+      } catch (err) {
+        log(`${spec.label} was not removed: ${err.message || err}`, 'warn');
+      }
+    }
   }
 
   async function autoProvisionCustomModules(showFeedback = false, statusCallback = null) {
@@ -1007,7 +1127,8 @@
       || null;
   }
 
-  const FUNCTION_SOURCE_MAX_CHARS = 60000;
+  // No limit for now: the whole function source goes into the prompt.
+  const FUNCTION_SOURCE_MAX_CHARS = Infinity;
 
   async function attachFunctionCodeToWorkflows(workflows) {
     if (!canUseZohoConnection() || !workflows?.length) return workflows || [];
@@ -1196,6 +1317,10 @@
     setTimeout(() => URL.revokeObjectURL(link.href), 1500);
   }
 
+  function documentFlowSection(wf) {
+    return `<section class="pdf-flow"><h2>Flow</h2>${renderFlowchart(wf)}</section>`;
+  }
+
   function pdfDocumentHtml(doc) {
     const g = doc.generated;
     return `
@@ -1209,7 +1334,7 @@
           <span><b>Written by</b> ${escapeHtml(g.generatedBy || aiName())}</span>
         </div>
       </header>
-      <article class="doc-view pdf-body">${renderMarkdown(g.markdown)}</article>`;
+      <article class="doc-view pdf-body">${documentFlowSection(doc.wf)}${renderMarkdown(g.markdown)}</article>`;
   }
 
   function renderPdfBytes(doc) {
@@ -1272,7 +1397,7 @@
       jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
       pagebreak: compact
         ? { mode: ['css'] }
-        : { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover'] }
+        : { mode: ['css', 'legacy'], avoid: ['h2', 'h3', 'tr', 'pre', 'blockquote', 'li', '.pdf-cover', '.fc'] }
     }).from(sheetFor(parts[0])).toPdf();
     parts.slice(1).forEach((html) => {
       worker = worker.get('pdf').then(p => { p.addPage(); }).from(sheetFor(html)).toContainer().toCanvas().toPdf();
@@ -1613,6 +1738,7 @@
     { key: 'crm', title: 'Zoho CRM connection' },
     { key: 'settings', title: 'Saved settings' },
     { key: 'modules', title: 'Documentation modules' },
+    { key: 'functions', title: 'AI functions and encrypted key store' },
     { key: 'model', title: 'AI provider' }
   ];
 
@@ -1713,12 +1839,18 @@
         else setCheck('modules', 'ok', 'Living_Docs_Settings and Living_Docs_Documents are installed.');
       }
 
-      const savedKey = state.ai.provider && state.aiKeys[state.ai.provider];
+      setCheck('functions', 'pending', `Calling ${LDF.GATEWAY_FN} and ${LDF.SAVE_FN}`);
+      const fnCheck = await checkAiFunctions();
+      if (fnCheck.status === 'ok') setCheck('functions', 'ok', fnCheck.detail);
+      else if (fnCheck.status === 'warn') warn('functions', fnCheck.detail);
+      else fail('functions', fnCheck.detail);
+
+      const info = keyInfo(state.ai.provider);
       const workspaceNote = state.ai.provider === 'anthropic' && state.ai.workspaceId ? ` Workspace ${state.ai.workspaceId}.` : '';
-      if (savedKey) {
-        setCheck('model', 'ok', `${aiName()} (${state.ai.model}). API key saved on Living_Docs_Settings.${workspaceNote}`);
-      } else if (state.hasApiKey) {
-        setCheck('model', 'ok', `${aiName()} (${state.ai.model}) with a saved API key.`);
+      if (state.ai.provider && info.set) {
+        setCheck('model', 'ok', `${aiName()} (${state.ai.model}). API key stored encrypted in CRM${info.hint ? `, ends in …${info.hint}` : ''}.${workspaceNote}`);
+      } else if (state.ai.provider && fnCheck.status === 'error') {
+        warn('model', `${aiName()} is selected. Its key can be saved once the AI functions are installed.`);
       } else if (state.ai.provider) {
         warn('model', `${aiName()} is selected but has no API key. Open the AI provider tab and paste it.`);
       } else {
@@ -1809,18 +1941,35 @@
     setBusy(dom.btnSetupInstall, true);
     try {
       if (canUseZohoConnection()) {
-        const saved = await autoProvisionCustomModules(true, appendSetupLog);
-        if (saved && saved.ok && (state.aiKeys.anthropic || state.aiKeys.cursor)) {
-          appendSetupLog('API keys saved on the Living_Docs_Settings record.', 'ok');
-        } else if (saved && !saved.ok) {
+        // Modules first: the gateway writes its daily counter to Living_Docs_Settings.
+        const provisioned = await autoProvisionCustomModules(false, appendSetupLog);
+        if (provisioned && provisioned.ok) {
+          const fns = await installAiFunctions(appendSetupLog);
+          if (fns.ok) await storeKeys(appendSetupLog);
+        }
+        const saved = await saveSettingsRecord(appendSetupLog);
+        if (saved.ok) {
+          appendSetupLog(`${saved.action === 'created' ? 'Created' : 'Updated'} settings record ${saved.id || ''}. It holds no API keys.`, 'ok');
+          if (state.clearLegacyKeys) {
+            const stillOnModule = LEGACY_SETTINGS_KEY_FIELDS.some(spec => !state.removedSettingsKeyFields?.[spec.api]);
+            if (stillOnModule) appendSetupLog('The old plain-text key fields on Living_Docs_Settings are now empty.', 'ok');
+            state.legacyKeys = { anthropic: '', cursor: '' };
+            state.clearLegacyKeys = false;
+          }
+        } else {
+          appendSetupLog(`Settings were not saved: ${saved.message || 'Could not write the settings row.'}`, 'warn');
           showToast(`Settings were not saved: ${saved.message || 'unknown error'}`, 'error');
         }
+        renderSettingsRecordStatus();
       } else {
         appendSetupLog('Not running inside Zoho CRM, so modules cannot be installed from here.', 'warn');
       }
     } catch (err) {
       appendSetupLog(`Install stopped: ${err.message || err}`, 'error');
     } finally {
+      state.pendingKeys = { anthropic: '', cursor: '' };
+      dom.setupAiClaudeKey.value = '';
+      dom.setupAiCursorKey.value = '';
       setBusy(dom.btnSetupInstall, false);
     }
     await runSetupCheck();
@@ -2460,43 +2609,172 @@
     });
   }
 
+  // ---------- Flowchart ----------
+  // Inline SVG so the screen and the PDF (html2canvas) draw the same shapes. Colours and fonts are attributes,
+  // not CSS, because html2canvas renders the SVG as an image without the page styles.
+  // Standard flowchart colours: green start/done, red stop, amber decision, process boxes coloured by action type.
+  const FC = {
+    width: 660, cx: 330, yesX: 120, noX: 540,
+    diamondW: 300, boxW: 204, pillH: 36, gap: 26,
+    line: '#64748b', yes: '#16a34a', no: '#dc2626',
+    font: 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif',
+    start: { fill: '#dcfce7', stroke: '#16a34a', text: '#14532d' },
+    done: { fill: '#dcfce7', stroke: '#16a34a', text: '#14532d' },
+    stop: { fill: '#fee2e2', stroke: '#dc2626', text: '#7f1d1d' },
+    decision: { fill: '#fef3c7', stroke: '#d97706', text: '#78350f', muted: '#92400e' },
+    kinds: {
+      fn: { label: 'Function', fill: '#ede9fe', stroke: '#7c3aed', text: '#4c1d95', muted: '#6d28d9' },
+      field: { label: 'Field update', fill: '#dbeafe', stroke: '#2563eb', text: '#1e3a8a', muted: '#1d4ed8' },
+      email: { label: 'Email', fill: '#ccfbf1', stroke: '#0d9488', text: '#134e4a', muted: '#0f766e' },
+      other: { label: 'Other action', fill: '#f1f5f9', stroke: '#64748b', text: '#1e293b', muted: '#475569' }
+    }
+  };
+  let fcSeq = 0;
+
+  function fcWrap(value, max, maxLines) {
+    const words = String(value || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    const lines = [];
+    let line = '';
+    let cut = false;
+    for (const word of words) {
+      const next = line ? `${line} ${word}` : word;
+      if (next.length <= max) { line = next; continue; }
+      if (line) lines.push(line);
+      if (lines.length === maxLines) { cut = true; line = ''; break; }
+      line = word.length > max ? `${word.slice(0, max - 1)}…` : word;
+    }
+    if (line) lines.push(line);
+    if (lines.length > maxLines) { lines.length = maxLines; cut = true; }
+    if (cut) lines[maxLines - 1] = `${lines[maxLines - 1].replace(/…$/, '').slice(0, max - 1)}…`;
+    return lines.length ? lines : [''];
+  }
+
   function renderFlowchart(wf) {
+    const id = `fc${++fcSeq}`;
+    const parts = [];
+    const text = (x, y, value, { size = 12, weight = 400, color = '#1e293b', anchor = 'middle' } = {}) =>
+      parts.push(`<text x="${x}" y="${y}" font-size="${size}" font-weight="${weight}" fill="${color}" text-anchor="${anchor}">${escapeHtml(value)}</text>`);
+    // tone: 'line' | 'yes' | 'no'; each has its own arrowhead so the head matches the line.
+    const path = (points, tone = 'line') =>
+      parts.push(`<polyline points="${points.map(p => p.join(',')).join(' ')}" fill="none" stroke="${FC[tone]}" stroke-width="1.6" stroke-linejoin="round" marker-end="url(#${id}-${tone})"/>`);
+    // Terminal: Start, Done, Stop.
+    const pill = (x, y, label, look) => {
+      const w = Math.min(230, Math.max(110, label.length * 7.4 + 44));
+      parts.push(`<rect x="${x - w / 2}" y="${y}" width="${w}" height="${FC.pillH}" rx="${FC.pillH / 2}" fill="${look.fill}" stroke="${look.stroke}" stroke-width="1.6"/>`);
+      text(x, y + 22.5, label, { size: 13, weight: 700, color: look.text });
+      return y + FC.pillH;
+    };
+    // Process step: one workflow action, coloured by its type.
+    const box = (x, y, action) => {
+      const look = FC.kinds[action.kind] || FC.kinds.other;
+      const titleLines = fcWrap(action.title, 28, 2);
+      const metaLines = action.meta ? fcWrap(action.meta, 34, 2) : [];
+      const h = 18 + titleLines.length * 17 + metaLines.length * 15;
+      const left = x - FC.boxW / 2;
+      parts.push(`<rect x="${left}" y="${y}" width="${FC.boxW}" height="${h}" rx="8" fill="${look.fill}" stroke="${look.stroke}" stroke-width="1.6"/>`);
+      // Coloured strip on the left edge, the usual marker for the step type.
+      parts.push(`<rect x="${left}" y="${y}" width="6" height="${h}" rx="3" fill="${look.stroke}"/>`);
+      titleLines.forEach((l, i) => text(x + 3, y + 23 + i * 17, l, { size: 13, weight: 700, color: look.text }));
+      metaLines.forEach((l, i) => text(x + 3, y + 23 + titleLines.length * 17 + i * 15, l, { size: 11.5, color: look.muted }));
+      return y + h;
+    };
+    // Decision: one condition of the rule.
+    const diamond = (top, title, criteria) => {
+      const look = FC.decision;
+      const lines = fcWrap(criteria, 30, 3);
+      const h = 92 + lines.length * 14;
+      const mid = top + h / 2;
+      const half = FC.diamondW / 2;
+      parts.push(`<polygon points="${FC.cx},${top} ${FC.cx + half},${mid} ${FC.cx},${top + h} ${FC.cx - half},${mid}" fill="${look.fill}" stroke="${look.stroke}" stroke-width="1.6" stroke-linejoin="round"/>`);
+      const firstY = mid - (lines.length * 14) / 2 + 1;
+      text(FC.cx, firstY, title, { size: 13, weight: 700, color: look.text });
+      lines.forEach((l, i) => text(FC.cx, firstY + 17 + i * 14, l, { size: 11.5, color: look.muted }));
+      return { mid, bottom: top + h, left: FC.cx - half, right: FC.cx + half };
+    };
+    // Yes / No tag on a branch, as a small filled badge.
+    const branchLabel = (x1, x2, y, value) => {
+      const color = value === 'Yes' ? FC.yes : FC.no;
+      const x = (x1 + x2) / 2;
+      parts.push(`<rect x="${x - 17}" y="${y - 22}" width="34" height="17" rx="8.5" fill="${color}"/>`);
+      text(x, y - 9.5, value, { size: 11, weight: 700, color: '#ffffff' });
+    };
+
     const branches = ruleBranches(wf);
-    const steps = branches.map((branch, index) => {
+    const kindsUsed = new Set();
+    let y = pill(FC.cx, 14, `Start: ${triggerLabel(wf.trigger_type)}`, FC.start);
+    let previous = null;
+    branches.forEach((branch, index) => {
       const last = index === branches.length - 1;
-      const actions = branch.actions.length
-        ? branch.actions.map(a => `<div class="fc-card"><strong>${escapeHtml(a.title)}</strong><span>${escapeHtml(a.meta)}</span></div>`).join('<i class="fc-stem"></i>')
-        : '<div class="fc-card"><strong>No actions</strong><span>Nothing runs for this criteria</span></div>';
-      return `
-        <section class="fc-step">
-          <div class="fc-cond">
-            <strong>${escapeHtml(branch.title)}</strong>
-            <span>${escapeHtml(shortCriteria(branch.criteria))}</span>
-          </div>
-          <i class="fc-neck"></i>
-          <div class="fc-fork">
-            <div class="fc-arm">
-              <span class="fc-yn yes">Yes</span>
-              <i class="fc-stem"></i>
-              ${actions}
-              <i class="fc-stem"></i>
-              <div class="fc-pill">Done</div>
-            </div>
-            <div class="fc-arm">
-              <span class="fc-yn no">No</span>
-              <i class="fc-stem"></i>
-              <div class="fc-pill">${last ? 'Stop' : 'Check next condition'}</div>
-              ${last ? '' : '<i class="fc-rail"></i>'}
-            </div>
-          </div>
-          ${last ? '' : '<div class="fc-join-wrap"><div class="fc-join"></div></div>'}
-        </section>`;
-    }).join('');
+      const top = y + FC.gap + 6;
+      if (previous) {
+        // "No" of the previous condition: right, down the side, then back into this condition.
+        path([[previous.right, previous.mid], [FC.noX, previous.mid], [FC.noX, y + 8], [FC.cx, y + 8], [FC.cx, top]], 'no');
+        branchLabel(previous.right, FC.noX, previous.mid, 'No');
+      } else {
+        path([[FC.cx, y], [FC.cx, top]]);
+      }
+      const d = diamond(top, branch.title, branch.criteria);
+
+      // "Yes": left, then down through the actions to Done.
+      let left = d.bottom + 18;
+      path([[d.left, d.mid], [FC.yesX, d.mid], [FC.yesX, left]], 'yes');
+      branchLabel(d.left, FC.yesX, d.mid, 'Yes');
+      const actions = branch.actions.length ? branch.actions : [{ title: 'No actions', meta: 'Nothing runs for this condition', kind: 'other' }];
+      actions.forEach((a, i) => {
+        kindsUsed.add(FC.kinds[a.kind] ? a.kind : 'other');
+        if (i) {
+          path([[FC.yesX, left], [FC.yesX, left + FC.gap - 4]]);
+          left += FC.gap - 4;
+        }
+        left = box(FC.yesX, left, a);
+      });
+      path([[FC.yesX, left], [FC.yesX, left + FC.gap - 4]]);
+      left = pill(FC.yesX, left + FC.gap - 4, 'Done', FC.done);
+
+      let right = d.mid;
+      if (last) {
+        path([[d.right, d.mid], [FC.noX, d.mid], [FC.noX, d.bottom + 18]], 'no');
+        branchLabel(d.right, FC.noX, d.mid, 'No');
+        right = pill(FC.noX, d.bottom + 18, 'Stop', FC.stop);
+      }
+      // The next condition starts below everything drawn for this one, so no lines cross.
+      y = Math.max(left, right, d.bottom) + 10;
+      previous = d;
+    });
+
+    // Legend: only the shapes and action types that appear in this chart.
+    const legend = [
+      { label: 'Start / Done', shape: 'pill', look: FC.start },
+      { label: 'Stop', shape: 'pill', look: FC.stop },
+      { label: 'Condition', shape: 'diamond', look: FC.decision },
+      ...['fn', 'field', 'email', 'other'].filter(k => kindsUsed.has(k)).map(k => ({ label: FC.kinds[k].label, shape: 'box', look: FC.kinds[k] }))
+    ];
+    y += 14;
+    parts.push(`<line x1="20" y1="${y}" x2="${FC.width - 20}" y2="${y}" stroke="#e2e8f0" stroke-width="1"/>`);
+    let lx = 24;
+    let ly = y + 22;
+    legend.forEach((item) => {
+      const w = 26 + item.label.length * 6.6 + 18;
+      if (lx + w > FC.width - 20) { lx = 24; ly += 22; }
+      const sy = ly - 9;
+      if (item.shape === 'pill') parts.push(`<rect x="${lx}" y="${sy}" width="18" height="11" rx="5.5" fill="${item.look.fill}" stroke="${item.look.stroke}" stroke-width="1.4"/>`);
+      else if (item.shape === 'diamond') parts.push(`<polygon points="${lx + 9},${sy - 2} ${lx + 18},${sy + 5.5} ${lx + 9},${sy + 13} ${lx},${sy + 5.5}" fill="${item.look.fill}" stroke="${item.look.stroke}" stroke-width="1.4"/>`);
+      else parts.push(`<rect x="${lx}" y="${sy}" width="18" height="11" rx="2.5" fill="${item.look.fill}" stroke="${item.look.stroke}" stroke-width="1.4"/>`);
+      text(lx + 24, ly, item.label, { size: 11, weight: 600, color: '#475569', anchor: 'start' });
+      lx += w;
+    });
+    const height = Math.ceil(ly + 12);
+    const marker = (tone) => `
+            <marker id="${id}-${tone}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0,1 L9,5 L0,9 z" fill="${FC[tone]}"/>
+            </marker>`;
     return `
       <div class="fc">
-        <div class="fc-pill">Start: ${escapeHtml(triggerLabel(wf.trigger_type))}</div>
-        <i class="fc-stem"></i>
-        ${steps}
+        <svg viewBox="0 0 ${FC.width} ${height}" width="${FC.width}" height="${height}" font-family="${FC.font}" role="img" aria-label="${escapeHtml(`Flowchart of ${wf.name || 'the workflow rule'}`)}" xmlns="http://www.w3.org/2000/svg">
+          <defs>${marker('line')}${marker('yes')}${marker('no')}
+          </defs>
+          ${parts.join('\n          ')}
+        </svg>
       </div>`;
   }
 
@@ -2640,7 +2918,7 @@
   const DR = window.DelugeReview;
   const LOCAL_BACKUP_PREFIX = 'livingdocs.fnBackups.';
   const LOCAL_BACKUP_LIMIT = 10;
-  const SEVERITY_LABEL = { error: 'Error', warning: 'Warning', info: 'Info' };
+  const SEVERITY_LABEL = { error: 'Risk', warning: 'Warning', info: 'Info' };
   let promptRebuildTimer = null;
   let tipLine = null;
 
@@ -2770,7 +3048,7 @@
     const { counts, mask } = r.result;
     const deluge = isDeluge(fn);
     const badges = [
-      deluge && counts.error ? `<span class="pill pill-red">${plural(counts.error, 'error')}</span>` : '',
+      deluge && counts.error ? `<span class="pill pill-red">${plural(counts.error, 'risk')}</span>` : '',
       deluge && counts.warning ? `<span class="pill pill-amber">${plural(counts.warning, 'warning')}</span>` : '',
       deluge && counts.info ? `<span class="pill pill-gray">${counts.info} info</span>` : '',
       deluge && !counts.error && !counts.warning && !counts.info ? '<span class="pill pill-green">No issues</span>' : '',
@@ -2872,7 +3150,7 @@
         <div class="checks-code">
           ${renderAnnotatedCode(fn.source, deluge ? issues : [], mask.spans)}
           <div class="code-legend">
-            <span><i class="lg lg-error"></i>Error</span><span><i class="lg lg-warning"></i>Warning</span><span><i class="lg lg-info"></i>Info</span>
+            <span><i class="lg lg-error"></i>Risk</span><span><i class="lg lg-warning"></i>Warning</span><span><i class="lg lg-info"></i>Info</span>
             <span><i class="lg lg-secret"></i>Masked before sending</span>
             <span class="muted">Hover a line for details. Select text to mask it.</span>
           </div>
@@ -2920,7 +3198,12 @@
 
   function renderImproveTab(fn, r) {
     if (r.applying) return loadingBlock('Saving a backup and updating the function in Zoho CRM…');
-    if (r.improving) return loadingBlock(state.hasApiKey ? `Sending the masked code to ${aiName()}. This usually takes 20 to 60 seconds.` : 'Adding review notes…');
+    if (r.improving) {
+      if (!state.hasApiKey) return loadingBlock('Adding review notes…');
+      return loadingBlock(r.improveChars
+        ? `${aiName()} is writing the improved code… ${r.improveChars.toLocaleString()} characters so far.`
+        : `Sending the masked code to ${aiName()}…`);
+    }
     const lastApply = r.lastApply ? `
       <div class="notice ${r.lastApply.verified === false ? 'warning' : 'info'} apply-done">
         <div>
@@ -3083,11 +3366,15 @@
     rerenderFnCard(fn);
     const baseSource = fn.source;
     try {
+      r.improveChars = 0;
       const resp = await window.LivingDocsAI.improveFunction(currentAiConfig(), {
         fn: { id: fn.id, name: fn.name, api_name: fn.api_name, language: fn.language || fn.runtime || 'deluge', signature: signature ? signature.text : '' },
         source: mask.masked,
         issues,
         placeholders: mask.entries.map(e => e.placeholder)
+      }, ({ text }) => {
+        r.improveChars = text.length;
+        rerenderFnCard(fn);
       });
       const restored = DR.unmask(resp.code, mask.entries);
       const code = restored.text;
@@ -3185,9 +3472,9 @@ if(inputText.trim() == "")
 	missing.put("message","payload is required");
 	return missing.toString();
 }
-input = inputText.toMap();
-functionId = ifnull(input.get("functionId"),"");
-code = ifnull(input.get("code"),"");
+requestData = inputText.toMap();
+functionId = ifnull(requestData.get("functionId"),"");
+code = ifnull(requestData.get("code"),"");
 if(functionId == "" || code.trim() == "")
 {
 	missing = Map();
@@ -3195,7 +3482,7 @@ if(functionId == "" || code.trim() == "")
 	missing.put("message","functionId and code are required");
 	return missing.toString();
 }
-domain = ifnull(input.get("apiDomain"),"https://www.zohoapis.com");
+domain = ifnull(requestData.get("apiDomain"),"https://www.zohoapis.com");
 if(!domain.startsWith("https://www.zohoapis."))
 {
 	domain = "https://www.zohoapis.com";
@@ -3207,7 +3494,7 @@ fnList.add(fnEntry);
 metadata = Map();
 metadata.put("functions",fnList);
 publish = Map();
-publish.put("changelog",ifnull(input.get("changelog"),"Updated by Living Docs"));
+publish.put("changelog",ifnull(requestData.get("changelog"),"Updated by Living Docs"));
 metadata.put("publish",publish);
 metaPart = Map();
 metaPart.put("paramName","metadata");
@@ -3252,6 +3539,13 @@ return response.toString();`;
     return { ran: false, reason: (raw && (raw.message || raw.code)) || 'the helper function did not run' };
   }
 
+  // The helper ran but its payload argument arrived empty: this way of calling it does not pass arguments.
+  function payloadMissing(parsed) {
+    const body = parsed && parsed.body;
+    const text = body && (body.code || body.raw_text || '');
+    return Boolean(parsed && parsed.ran && /MISSING_INPUT/.test(String(text)));
+  }
+
   async function updateViaHelper(identifier, source, changelog) {
     if (typeof ZOHO === 'undefined' || (!ZOHO.CRM?.FUNCTIONS?.execute && !ZOHO.CRM?.CONNECTION?.invoke)) {
       return { ran: false, reason: 'This widget is not running inside Zoho CRM.' };
@@ -3260,51 +3554,48 @@ return response.toString();`;
     const payload = JSON.stringify(payloadObject);
     const reasons = [];
     const startedAt = Date.now();
+    const executeUrl = version => `${payloadObject.apiDomain}/crm/${version}/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`;
+    const viaConnection = parameters => () => ZOHO.CRM.CONNECTION.invoke(conn(), {
+      url: executeUrl(parameters.version),
+      method: 'POST',
+      param_type: 2,
+      headers: { 'Content-Type': 'application/json' },
+      parameters: parameters.body
+    });
 
-    if (ZOHO.CRM?.CONNECTION?.invoke) {
-      const attempts = [
-        { url: `${payloadObject.apiDomain}/crm/v2/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: { payload } } },
-        { url: `${payloadObject.apiDomain}/crm/v2/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: JSON.stringify({ payload }) } },
-        { url: `${payloadObject.apiDomain}/crm/v8/functions/${UPDATE_HELPER_NAME}/actions/execute?auth_type=oauth`, parameters: { arguments: { payload } } }
-      ];
-      for (const attempt of attempts) {
-        try {
-          const raw = await withHardTimeout(ZOHO.CRM.CONNECTION.invoke(conn(), {
-            url: attempt.url,
-            method: 'POST',
-            param_type: 2,
-            headers: { 'Content-Type': 'application/json' },
-            parameters: attempt.parameters
-          }), 90000, 'Function update');
-          const parsed = helperResultFromRaw(raw);
-          debugLog(parsed.ran ? 'ok' : 'warn', conn(), 'POST', attempt.url, { request: { functionId: identifier }, raw, ms: Date.now() - startedAt });
-          if (parsed.ran) return parsed;
-          if (parsed.reason) reasons.push(parsed.reason);
-        } catch (err) {
-          reasons.push(describeSdkError(err));
-        }
-      }
-    }
-
+    // FUNCTIONS.execute first: it is how the AI gateway is called, and it hands "payload" to the function.
+    // The REST calls through the connection are fallbacks; Zoho has dropped the argument on some of them.
+    const attempts = [];
     if (ZOHO.CRM?.FUNCTIONS?.execute) {
+      attempts.push({ label: 'FUNCTIONS.execute', run: () => ZOHO.CRM.FUNCTIONS.execute(UPDATE_HELPER_NAME, { arguments: JSON.stringify({ payload }) }) });
+    }
+    if (ZOHO.CRM?.CONNECTION?.invoke) {
+      attempts.push(
+        { label: 'REST v8 arguments object', run: viaConnection({ version: 'v8', body: { arguments: { payload } } }) },
+        { label: 'REST v8 arguments string', run: viaConnection({ version: 'v8', body: { arguments: JSON.stringify({ payload }) } }) },
+        { label: 'REST v2 arguments object', run: viaConnection({ version: 'v2', body: { arguments: { payload } } }) },
+        { label: 'REST v2 payload field', run: viaConnection({ version: 'v2', body: { payload } }) }
+      );
+    }
+
+    for (const attempt of attempts) {
       try {
-        const raw = await withHardTimeout(
-          ZOHO.CRM.FUNCTIONS.execute(UPDATE_HELPER_NAME, { arguments: JSON.stringify({ payload }) }),
-          90000,
-          'Function update'
-        );
+        const raw = await withHardTimeout(attempt.run(), 90000, 'Function update');
         const parsed = helperResultFromRaw(raw);
-        debugLog(parsed.ran ? 'ok' : 'warn', UPDATE_HELPER_NAME, 'EXECUTE', UPDATE_HELPER_NAME, { request: { functionId: identifier }, raw, ms: Date.now() - startedAt });
+        const missing = payloadMissing(parsed);
+        debugLog(parsed.ran && !missing ? 'ok' : 'warn', conn(), 'EXECUTE', `${UPDATE_HELPER_NAME} (${attempt.label})`, { request: { functionId: identifier }, raw, ms: Date.now() - startedAt });
+        if (missing) {
+          reasons.push(`${attempt.label}: payload did not reach the function`);
+          continue;
+        }
         if (parsed.ran) return parsed;
-        if (parsed.reason) reasons.push(parsed.reason);
+        if (parsed.reason) reasons.push(`${attempt.label}: ${parsed.reason}`);
       } catch (err) {
-        const reason = describeSdkError(err);
-        reasons.push(reason);
-        debugLog('warn', UPDATE_HELPER_NAME, 'EXECUTE', UPDATE_HELPER_NAME, { request: { functionId: identifier }, error: err, ms: Date.now() - startedAt });
+        reasons.push(`${attempt.label}: ${describeSdkError(err)}`);
       }
     }
 
-    const reason = reasons.find(item => item && !/EXPECTED_PARAM_MISSING|INVALID_REQUEST/i.test(item)) || reasons[0] || 'the helper function did not run';
+    const reason = reasons.find(item => item && !/EXPECTED_PARAM_MISSING|INVALID_REQUEST|did not reach/i.test(item)) || reasons.join('; ') || 'the helper function did not run';
     return { ran: false, reason };
   }
 
@@ -3334,7 +3625,11 @@ return response.toString();`;
 
   function updateHelperRequiredError(reason) {
     const detail = reason ? ` Zoho said: ${reason}.` : '';
-    const err = new Error(`Apply could not run "${UPDATE_HELPER_NAME}".${detail} Open that function, turn on REST API with OAuth 2.0, and paste the latest script from the setup steps. Then apply again.`);
+    // The function ran every time but never got its argument: the argument itself is set up wrong.
+    const fix = /did not reach/.test(reason || '')
+      ? `Open that function, click Edit Arguments, and make sure there is exactly one argument named payload (lower case) of type String. Save, then apply again.`
+      : 'Open that function, turn on REST API with OAuth 2.0, and paste the latest script from the setup steps. Then apply again.';
+    const err = new Error(`Apply could not run "${UPDATE_HELPER_NAME}".${detail} ${fix}`);
     err.code = 'UPDATE_HELPER_REQUIRED';
     return err;
   }
@@ -3435,6 +3730,339 @@ return response.toString();`;
     const copyBtn = $('helperCopy');
     if (copyBtn) copyBtn.addEventListener('click', () => copyText(script, copyBtn, 'Copy code'));
     return pending.then(Boolean);
+  }
+
+  // ==========================================
+  // AI FUNCTIONS AND THE ENCRYPTED KEY STORE
+  // livingdocs_save_api_key and livingdocs_llm_gateway share one random secret. Install writes both with a
+  // fresh secret when either is missing or they no longer match, then stores the API keys again.
+  // ==========================================
+  function aiFunctionSpecs(secret, tag) {
+    return [
+      {
+        key: 'save',
+        name: LDF.SAVE_FN,
+        display: 'Living Docs save API key',
+        description: `Stores the Living Docs AI API keys AES-encrypted in the Org Variable ${LDF.VAR_NAME}. CRM Administrators only.`,
+        script: LDF.saveKeyScript({ secret, tag, connection: conn() })
+      },
+      {
+        key: 'gateway',
+        name: LDF.GATEWAY_FN,
+        display: 'Living Docs LLM gateway',
+        description: 'Sends Living Docs prompts to Claude or Cursor with the encrypted key. The key never leaves CRM.',
+        script: LDF.gatewayScript({ secret, tag, settingsModule: logModuleApi('settings') })
+      }
+    ];
+  }
+
+  // Both functions report a tag derived from their secret; equal tags mean the saved keys can be decrypted.
+  async function aiFunctionHealth() {
+    const out = { saveTag: '', gatewayTag: '', saveCode: '', gatewayCode: '', saveError: '', gatewayError: '', keyStatus: '', gatewayVersion: 0 };
+    await Promise.all([
+      window.LivingDocsAI.checkSaveFunction()
+        .then((r) => { out.saveTag = r.secretTag; })
+        .catch((e) => { out.saveCode = e.code || 'ERROR'; out.saveError = e.message || String(e); }),
+      window.LivingDocsAI.keyStatus()
+        .then((r) => { out.gatewayTag = r.secretTag; out.gatewayVersion = r.version; out.keyStatus = r.keyStatus; applyKeyState(r.keys); })
+        .catch((e) => { out.gatewayCode = e.code || 'ERROR'; out.gatewayError = e.message || String(e); })
+    ]);
+    state.keyStoreStatus = out.keyStatus || 'unknown';
+    out.mismatch = Boolean(out.saveTag && out.gatewayTag && out.saveTag !== out.gatewayTag);
+    out.ready = Boolean(out.saveTag && out.saveTag === out.gatewayTag);
+    out.outdated = out.ready && out.gatewayVersion < LDF.GATEWAY_VERSION;
+    return out;
+  }
+
+  async function checkAiFunctions() {
+    if (!canUseZohoConnection()) return { status: 'error', detail: 'Open this widget inside Zoho CRM.' };
+    const health = await aiFunctionHealth();
+    if (health.gatewayError) return { status: 'error', detail: `${LDF.GATEWAY_FN} is not ready: ${health.gatewayError}` };
+    if (health.saveError) return { status: 'error', detail: `${LDF.SAVE_FN} is not ready: ${health.saveError}` };
+    if (health.mismatch) return { status: 'error', detail: 'The two AI functions hold different secrets. Install rewrites both, then the API keys are saved again.' };
+    if (health.keyStatus === 'unreadable') return { status: 'error', detail: 'The stored API keys cannot be decrypted. Run Install, then save the API keys again.' };
+    // An error, not a note: notes do not stop at the setup screen, so the admin would never see the Submit button.
+    if (health.outdated) {
+      return { status: 'error', detail: `${LDF.GATEWAY_FN} is an older version (${health.gatewayVersion} of ${LDF.GATEWAY_VERSION}). An administrator should press Submit once to update it; the saved keys are kept.` };
+    }
+    if (state.legacyKeys.anthropic || state.legacyKeys.cursor) {
+      return { status: 'warn', detail: 'API keys are still in plain text on Living_Docs_Settings. An administrator should press Submit once to move them into the encrypted store.' };
+    }
+    return { status: 'ok', detail: `Installed. API keys are stored AES-encrypted in the Org Variable ${LDF.VAR_NAME} and never reach the browser.` };
+  }
+
+  async function findAiFunctions() {
+    const catalog = await fetchFunctionCatalog(conn());
+    const pick = name => catalog.find(fn => [fn.api_name, fn.name].some(v => String(v || '').toLowerCase() === name)) || null;
+    return { save: pick(LDF.SAVE_FN), gateway: pick(LDF.GATEWAY_FN) };
+  }
+
+  // Multi Line ("textarea") so the encrypted value is not cut. Its value is "unset" until a key is saved.
+  async function ensureKeyVariable(log) {
+    let vars = [];
+    try {
+      const body = await crmGet('/crm/v8/settings/variables', { timeoutMs: 15000 });
+      vars = Array.isArray(body.variables) ? body.variables : [];
+    } catch (err) {
+      log(`Org Variables could not be read: ${err.message || err}. Add ZohoCRM.settings.variables.ALL to "${conn()}".`, 'error');
+      return false;
+    }
+    const found = vars.find(v => v.api_name === LDF.VAR_NAME);
+    if (found) {
+      if (found.type && !/textarea/i.test(found.type)) log(`${LDF.VAR_NAME} is a ${found.type} variable. Change it to Multi Line, or the encrypted key may be cut.`, 'warn');
+      else log(`Org Variable ${LDF.VAR_NAME} exists.`, 'ok');
+      return true;
+    }
+    let group = { api_name: 'General' };
+    try {
+      const body = await crmGet('/crm/v8/settings/variable_groups', { timeoutMs: 15000 });
+      const groups = Array.isArray(body.variable_groups) ? body.variable_groups : [];
+      const general = groups.find(g => /^general$/i.test(g.api_name || g.name || '')) || groups[0];
+      if (general && general.id) group = { id: general.id };
+    } catch (_) { /* "General" is the default group */ }
+    log(`Creating Org Variable ${LDF.VAR_NAME}…`, 'info');
+    try {
+      const resp = await withHardTimeout(invokeZohoConnectionAPI(conn(), {
+        endpoint: '/crm/v8/settings/variables',
+        method: 'POST',
+        payload: {
+          variables: [{
+            name: 'Living Docs LLM Key',
+            api_name: LDF.VAR_NAME,
+            type: 'textarea',
+            variable_group: group,
+            value: 'unset',
+            description: `Encrypted AI API keys for Living Docs. Written only by ${LDF.SAVE_FN}.`
+          }]
+        }
+      }), 20000, `Create ${LDF.VAR_NAME}`);
+      const row = resp?.variables?.[0] || resp || {};
+      if (row.code === 'SUCCESS' || row.status === 'success' || row.code === 'DUPLICATE_DATA') {
+        log(`Org Variable ${LDF.VAR_NAME} created.`, 'ok');
+        return true;
+      }
+      log(`Org Variable ${LDF.VAR_NAME} was not created: ${row.message || row.code || JSON.stringify(resp).slice(0, 200)}`, 'error');
+    } catch (err) {
+      log(`Org Variable ${LDF.VAR_NAME} was not created: ${err.message || err}`, 'error');
+    }
+    return false;
+  }
+
+  // Same multipart shape as the function update API. Zoho does not document create, so the function list
+  // decides whether it worked; when it did not, setup shows the scripts to paste instead.
+  async function createDelugeFunction(spec) {
+    const url = `${getZohoApiDomain()}/crm/v8/settings/functions`;
+    const metadata = {
+      functions: [{
+        display_name: spec.display,
+        api_name: spec.name,
+        name: spec.name,
+        description: spec.description,
+        category: 'standalone',
+        language: 'deluge',
+        return_type: 'string',
+        params: [{ name: 'payload', type: 'STRING' }],
+        _code: spec.script
+      }]
+    };
+    const request = {
+      url,
+      method: 'POST',
+      param_type: 2,
+      CONTENT_TYPE: 'multipart',
+      PARTS: [{ headers: { 'Content-Disposition': 'form-data; name="metadata"', 'Content-Type': 'application/json' }, content: metadata }],
+      FILE: { fileParam: 'code', file: new File([spec.script], `${spec.name}.ds`, { type: 'text/plain' }) }
+    };
+    const startedAt = Date.now();
+    let body = null;
+    let reason = '';
+    try {
+      const raw = await withHardTimeout(ZOHO.CRM.CONNECTION.invoke(conn(), request), 60000, `Create ${spec.name}`);
+      body = unwrapConnectionResponse(raw);
+      // The request holds the secret, so only the function name is logged.
+      debugLog('ok', conn(), 'POST', url, { request: { name: spec.name }, body, ms: Date.now() - startedAt });
+    } catch (err) {
+      reason = describeSdkError(err);
+    }
+    const row = body && Array.isArray(body.functions) ? body.functions[0] : body;
+    if (row && (String(row.status || '').toLowerCase() === 'success' || row.code === 'SUCCESS')) return row;
+    await sleep(1500);
+    const found = await findAiFunctions().catch(() => ({}));
+    if (found[spec.key]) return found[spec.key];
+    throw new Error(reason || (row && (row.message || row.code)) || 'Zoho did not create the function');
+  }
+
+  async function installAiFunctions(log) {
+    log(`Checking the AI functions ${LDF.SAVE_FN} and ${LDF.GATEWAY_FN}…`, 'info');
+    if (!(await ensureKeyVariable(log))) return { ok: false };
+    const health = await aiFunctionHealth();
+    if (health.ready) {
+      log('Both AI functions are installed and share the same secret.', 'ok');
+      if (health.outdated) await upgradeGateway(health, log);
+      return { ok: true, rewritten: false };
+    }
+    let existing = { save: null, gateway: null };
+    try {
+      existing = await findAiFunctions();
+    } catch (err) {
+      log(`Functions could not be listed: ${err.message || err}`, 'warn');
+    }
+    // Both exist and nothing says they differ, yet neither answers: REST API (OAuth 2.0) is usually still off.
+    const notDeployed = [health.saveCode, health.gatewayCode].includes('NOT_DEPLOYED');
+    if (existing.save && existing.gateway && !health.mismatch && !notDeployed) {
+      log('Both AI functions exist but could not be called. Turn on REST API with OAuth 2.0 for each.', 'warn');
+      return showAiFunctionsDialog({ restOnly: true, log });
+    }
+
+    const secret = LDF.randomSecret();
+    const tag = await LDF.secretTagOf(secret);
+    const specs = aiFunctionSpecs(secret, tag);
+    const manual = [];
+    for (const spec of specs) {
+      const fn = existing[spec.key];
+      try {
+        if (fn) {
+          await updateFunctionInCrm(fn, spec.script, 'Living Docs: new key-store secret');
+          log(`${spec.name} updated with a new secret.`, 'ok');
+        } else {
+          await createDelugeFunction(spec);
+          log(`${spec.name} created.`, 'ok');
+        }
+      } catch (err) {
+        manual.push(spec);
+        log(`${spec.name} could not be ${fn ? 'updated' : 'created'} from the widget: ${err.message || err}`, 'warn');
+      }
+    }
+    const after = await aiFunctionHealth();
+    if (!after.ready) {
+      return showAiFunctionsDialog({ specs: manual.length ? manual : [], restOnly: !manual.length, log });
+    }
+    log('Both AI functions are ready. Keys saved under the old secret cannot be read, so they are stored again now.', 'ok');
+    return { ok: true, rewritten: true };
+  }
+
+  // A newer gateway script is written with the secret the installed one already holds, so stored keys stay readable.
+  async function upgradeGateway(health, log) {
+    log(`Updating ${LDF.GATEWAY_FN} from version ${health.gatewayVersion} to ${LDF.GATEWAY_VERSION}…`, 'info');
+    let fn = null;
+    try {
+      fn = (await findAiFunctions()).gateway;
+    } catch (err) {
+      log(`Functions could not be listed: ${err.message || err}`, 'warn');
+    }
+    if (!fn) {
+      log(`${LDF.GATEWAY_FN} was not found in the function list, so it was not updated.`, 'warn');
+      return false;
+    }
+    const download = await downloadFunctionSource(conn(), { id: fn.id, api_name: fn.api_name });
+    const match = /^\s*secret\s*=\s*"([A-Za-z0-9]{32,})"\s*;/m.exec(download.source || '');
+    const secret = match ? match[1] : '';
+    const tag = secret ? await LDF.secretTagOf(secret) : '';
+    if (!secret || tag !== health.gatewayTag) {
+      log(`The secret in ${LDF.GATEWAY_FN} could not be read (${download.note || 'no match'}). It keeps working, but without the newest fixes.`, 'warn');
+      return false;
+    }
+    const spec = aiFunctionSpecs(secret, tag).find(s => s.key === 'gateway');
+    try {
+      await updateFunctionInCrm(fn, spec.script, `Living Docs: gateway version ${LDF.GATEWAY_VERSION}`);
+    } catch (err) {
+      log(`${LDF.GATEWAY_FN} could not be updated from the widget: ${err.message || err}`, 'warn');
+      return (await showAiFunctionsDialog({ specs: [spec], log })).ok;
+    }
+    const after = await aiFunctionHealth();
+    if (after.ready && !after.outdated) {
+      log(`${LDF.GATEWAY_FN} updated to version ${LDF.GATEWAY_VERSION}. The saved keys still work.`, 'ok');
+      return true;
+    }
+    log(`${LDF.GATEWAY_FN} was written but still reports version ${after.gatewayVersion}.`, 'warn');
+    return false;
+  }
+
+  function aiFunctionsDialogHtml(specs, restOnly, note) {
+    const names = [LDF.SAVE_FN, LDF.GATEWAY_FN].map(n => `<code>${n}</code>`).join(' and ');
+    const steps = restOnly
+      ? `<ol class="helper-steps">
+          <li>In Zoho CRM open <strong>Setup &gt; Developer Hub &gt; Functions</strong>.</li>
+          <li>For ${names}: open the function's menu, choose <strong>REST API</strong>, turn on <strong>OAuth 2.0</strong> and save.</li>
+        </ol>`
+      : `<ol class="helper-steps">
+          <li>In Zoho CRM open <strong>Setup &gt; Developer Hub &gt; Functions</strong> and click <strong>New Function</strong> for each script below (or open the existing one).</li>
+          <li>Function name exactly as shown, category <strong>Standalone</strong>.</li>
+          <li><strong>Edit Arguments</strong>: one argument named <code>payload</code>, type <strong>String</strong>. Return type <strong>String</strong>.</li>
+          <li>Replace the body with the script, then <strong>Save</strong>.</li>
+          <li>Open the function's menu, choose <strong>REST API</strong>, turn on <strong>OAuth 2.0</strong> and save.</li>
+        </ol>`;
+    const blocks = specs.map(spec => `
+        <div class="helper-code-head"><span><code>${spec.name}</code></span>
+          <span class="row gap-8">
+            <button type="button" class="btn btn-ghost btn-sm" data-ai-fn-copy="${spec.key}:name">Copy name</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-ai-fn-copy="${spec.key}:code">Copy code</button>
+          </span>
+        </div>
+        <pre class="helper-code">${escapeHtml(spec.script)}</pre>`).join('');
+    return `
+      <p>${restOnly
+        ? `The widget calls ${names} as the signed-in user, which Zoho allows only when REST API is on.`
+        : 'Zoho did not let the widget write these functions. Create them once by hand; the scripts already contain the connection name and a new random secret.'}</p>
+      ${note ? `<div class="notice error">${escapeHtml(note)}</div>` : ''}
+      ${steps}
+      ${blocks}
+      ${specs.length ? '<p class="muted small">Both scripts share one secret that exists only in these two functions. Do not paste them anywhere else. If you only paste one, the other must be the one the widget just wrote.</p>' : ''}`;
+  }
+
+  async function showAiFunctionsDialog({ specs = [], restOnly = false, log = () => {} }) {
+    let note = '';
+    for (;;) {
+      const pending = confirmDialog({
+        title: restOnly ? 'Turn on REST API for the AI functions' : 'One-time setup: AI functions',
+        confirmLabel: 'Done, check again',
+        html: aiFunctionsDialogHtml(specs, restOnly, note)
+      });
+      dom.modalBody.querySelectorAll('[data-ai-fn-copy]').forEach((btn) => {
+        const [key, what] = btn.dataset.aiFnCopy.split(':');
+        const spec = specs.find(s => s.key === key);
+        if (spec) btn.addEventListener('click', () => copyText(what === 'name' ? spec.name : spec.script, btn, what === 'name' ? 'Copy name' : 'Copy code'));
+      });
+      if (!(await pending)) {
+        log('AI functions are not ready yet. Press Submit again when they are.', 'warn');
+        return { ok: false };
+      }
+      const health = await aiFunctionHealth();
+      if (health.ready) {
+        log('Both AI functions answer and share the same secret.', 'ok');
+        return { ok: true, rewritten: specs.length > 0 };
+      }
+      note = health.mismatch
+        ? 'The two functions still hold different secrets. Paste the script shown here, exactly as it is.'
+        : `Still not callable: ${health.saveError || health.gatewayError || 'no answer from Zoho'}`;
+    }
+  }
+
+  // Typed keys go to livingdocs_save_api_key; plain-text keys from an older settings record are moved the same way.
+  async function storeKeys(log) {
+    const domain = getZohoApiDomain();
+    for (const provider of ['anthropic', 'cursor']) {
+      const label = (AI_PROVIDER_DEFAULTS[provider] || {}).label || provider;
+      const typed = state.pendingKeys[provider];
+      const legacy = state.legacyKeys[provider];
+      const key = typed || (keyInfo(provider).set ? '' : legacy);
+      if (key) {
+        try {
+          const res = await window.LivingDocsAI.saveApiKey(provider, key, domain);
+          applyKeyState(res.keys);
+          log(`${label} API key stored encrypted in ${LDF.VAR_NAME}${typed ? '' : ' (moved from Living_Docs_Settings)'}.`, 'ok');
+        } catch (err) {
+          log(`${label} API key was not stored: ${err.message || err}`, 'error');
+        }
+      }
+      if (provider === state.ai.provider && !keyInfo(provider).set) {
+        log(`No ${label} API key is stored yet. Paste it on the AI provider tab, then press Submit.`, 'warn');
+      }
+    }
+    state.pendingKeys = { anthropic: '', cursor: '' };
+    // Blank the old fields only when every plain-text key is safely in the encrypted store.
+    const legacyProviders = ['anthropic', 'cursor'].filter(p => state.legacyKeys[p]);
+    state.clearLegacyKeys = legacyProviders.length > 0 && legacyProviders.every(p => keyInfo(p).set);
   }
 
   async function applyImproved(fn) {
@@ -3847,8 +4475,12 @@ return response.toString();`;
       return;
     }
     if (doc.status === 'pending') {
-      dom.docStatus.textContent = `${aiName()} is writing the documentation for ${doc.wf.name}…${progress}`;
-      dom.docView.innerHTML = loadingBlock('This usually takes 20 to 60 seconds.');
+      const words = doc.partial ? doc.partial.trim().split(/\s+/).length : 0;
+      dom.docStatus.textContent = `${aiName()} is writing the documentation for ${doc.wf.name}…${words ? ` ${words.toLocaleString()} words so far.` : ''}${progress}`;
+      // The text so far is shown as it arrives, so the page never sits on a spinner.
+      dom.docView.innerHTML = doc.partial
+        ? renderMarkdown(window.LivingDocsAI.cleanMarkdown(doc.partial)) + loadingBlock('Still writing…')
+        : loadingBlock(`Waiting for ${aiName()}'s first lines…`);
     } else if (doc.status === 'error') {
       dom.docStatus.textContent = `The document for ${doc.wf.name} could not be written.${progress}`;
       dom.docView.innerHTML = `<div class="notice error">${escapeHtml(doc.error)}</div>
@@ -3857,7 +4489,7 @@ return response.toString();`;
       if (retry) retry.addEventListener('click', () => retryDocument(doc));
     } else {
       dom.docStatus.textContent = `${doc.wf.name}: written by ${doc.generated.generatedBy}${doc.tokens}.${progress} Check the preview, then save it.`;
-      dom.docView.innerHTML = renderMarkdown(doc.generated.markdown);
+      dom.docView.innerHTML = documentFlowSection(doc.wf) + renderMarkdown(doc.generated.markdown);
       if (doc.notes.length) {
         dom.docNotice.textContent = doc.notes.join(' ');
         dom.docNotice.hidden = false;
@@ -3871,7 +4503,15 @@ return response.toString();`;
     const system = scrubIdsForAI(DR.scrubText(String(p.system || '').trim(), entries));
     const user = scrubIdsForAI(DR.scrubText(String(p.user || '').trim(), entries));
     try {
-      const resp = await window.LivingDocsAI.callAi(currentAiConfig(), { system, user, maxTokens: p.maxTokens || 3000 });
+      const resp = await window.LivingDocsAI.callAi(currentAiConfig(), {
+        system,
+        user,
+        onProgress: ({ text }) => {
+          doc.partial = text;
+          if (activeDoc() === doc) renderDocs();
+        }
+      });
+      doc.partial = '';
       const markdown = window.LivingDocsAI.cleanMarkdown(resp.text);
       if (!markdown) throw new Error(`${resp.label} did not return a document.`);
       const at = new Date().toISOString();
@@ -4366,7 +5006,7 @@ return response.toString();`;
         <div class="pdf-brand">${escapeHtml(run.label)} · master document · v${escapeHtml(g.version)} · ${escapeHtml(formatDate(g.at))} · ${written.length} rules · ${escapeHtml(writers || aiName())}</div>
         ${missing.length ? `<p class="pdf-missing">Not in this version: ${missing.map(d => escapeHtml(d.wf.name)).join(', ')}</p>` : ''}
       </header>`;
-    return [cover, ...written.map(d => `<section class="pdf-rule">${renderMarkdown(d.generated.markdown)}</section>`)];
+    return [cover, ...written.map(d => `<section class="pdf-rule">${documentFlowSection(d.wf)}${renderMarkdown(d.generated.markdown)}</section>`)];
   }
 
   function modulePdfBytes(run, docs) {
@@ -4614,13 +5254,14 @@ return response.toString();`;
 
   const AI_PROVIDER_DEFAULTS = window.LivingDocsAI.PROVIDERS;
   const AI_URL_HINTS = {
-    anthropic: 'Anthropic Messages API. Keep the default unless you use a proxy.',
-    cursor: 'Cursor Cloud Agents API base URL. Keep https://api.cursor.com unless Cursor gave you another one.'
+    anthropic: `Fixed. ${LDF.GATEWAY_FN} only sends the key to api.anthropic.com.`,
+    cursor: `Fixed. ${LDF.GATEWAY_FN} only sends the key to api.cursor.com.`
   };
   const AI_KEY_HINTS = {
     anthropic: 'Create a key in the Anthropic console under Settings > API keys.',
     cursor: 'Create a user API key at cursor.com/dashboard/api. Each request runs a short cloud agent that is deleted afterwards.'
   };
+  const KEY_STORE_NOTE = `Stored AES-encrypted in the CRM Org Variable ${LDF.VAR_NAME}, not in a module, and never shown again. Only a CRM Administrator can change it.`;
   // Shown until the provider returns the models this key can use.
   const AI_MODEL_OPTIONS = {
     anthropic: [
@@ -4650,12 +5291,14 @@ return response.toString();`;
     selectEl.value = list.some(m => m.id === current) ? current : (list[0] ? list[0].id : '');
   }
 
-  // Replaces the model options with the ones the key can use (GET /v1/models). Keeps the defaults on failure.
+  // Replaces the model options with the ones the saved key can use (GET /v1/models through the gateway).
+  // Keeps the defaults on failure, and until a key is stored.
   async function loadAiModels(values, selectEl) {
     if (!selectEl || !values.aiProvider) return;
     const cfg = aiConfigFrom(values);
-    if (!cfg.apiKey) return;
-    const cacheKey = `${cfg.provider}|${cfg.apiUrl}|${cfg.workspaceId || ''}|${cfg.apiKey.slice(-6)}`;
+    const info = keyInfo(cfg.provider);
+    if (!info.set) return;
+    const cacheKey = `${cfg.provider}|${cfg.workspaceId || ''}|${info.hint}`;
     try {
       let models = aiModelCache[cacheKey];
       if (!models) models = await window.LivingDocsAI.listModels(cfg);
@@ -4673,21 +5316,27 @@ return response.toString();`;
   function aiFormValues() {
     const provider = dom.settingsAiProvider.value;
     const preset = aiPreset(provider);
-    const typed = dom.settingsAiKey.value.trim();
-    const stored = state.clearAiKey ? '' : (state.aiKeys[provider] || '');
     return {
       aiProvider: provider,
       aiLabel: dom.settingsAiLabel.value.trim(),
       aiApiUrl: preset.editableUrl === false ? preset.apiUrl : dom.settingsAiUrl.value.trim(),
       aiModel: dom.settingsAiModel.value.trim(),
       aiWorkspaceId: provider === 'anthropic' ? $('settingsAiWorkspace').value.trim() : '',
-      aiApiKey: typed || stored
+      // Only a newly typed key; a stored one stays inside CRM.
+      aiApiKey: dom.settingsAiKey.value.trim()
     };
   }
 
   function keySavedText(provider) {
-    const key = state.aiKeys[provider] || '';
-    return key ? `Saved on Living_Docs_Settings, ends in …${key.slice(-4)}. Leave blank to keep it.` : (AI_KEY_HINTS[provider] || 'Saved on the Living_Docs_Settings record.');
+    const info = keyInfo(provider);
+    return info.set
+      ? `Stored encrypted in CRM${info.hint ? `, ends in …${info.hint}` : ''}. Leave blank to keep it.`
+      : `${AI_KEY_HINTS[provider] || ''} ${KEY_STORE_NOTE}`.trim();
+  }
+
+  function keyPlaceholder(provider, fallback) {
+    const info = keyInfo(provider);
+    return info.set ? `Stored encrypted${info.hint ? `, ends in …${info.hint}` : ''}` : fallback;
   }
 
   function fillSetupAiForm() {
@@ -4700,7 +5349,8 @@ return response.toString();`;
     dom.setupAiCursorKey.value = '';
     dom.setupAiTestResult.hidden = true;
     renderSetupAiFields(false);
-    if (state.ai.provider && state.aiKeys[state.ai.provider]) loadAiModels(setupAiValues(), dom.setupAiModel);
+    if (dom.setupAiSummary) dom.setupAiSummary.textContent = `${KEY_STORE_NOTE} Leave the key blank to keep the one already stored.`;
+    if (state.ai.provider && keyInfo(state.ai.provider).set) loadAiModels(setupAiValues(), dom.setupAiModel);
   }
 
   function renderSetupAiFields(providerChanged) {
@@ -4723,8 +5373,8 @@ return response.toString();`;
     $('setupAiCursorField').hidden = provider !== 'cursor';
     dom.setupAiClaudeHint.textContent = keySavedText('anthropic');
     dom.setupAiCursorHint.textContent = keySavedText('cursor');
-    dom.setupAiClaudeKey.placeholder = state.aiKeys.anthropic ? `Saved, ends in …${state.aiKeys.anthropic.slice(-4)}` : 'Paste the Claude API key';
-    dom.setupAiCursorKey.placeholder = state.aiKeys.cursor ? `Saved, ends in …${state.aiKeys.cursor.slice(-4)}` : 'Paste the Cursor API key';
+    dom.setupAiClaudeKey.placeholder = keyPlaceholder('anthropic', 'Paste the Claude API key');
+    dom.setupAiCursorKey.placeholder = keyPlaceholder('cursor', 'Paste the Cursor API key');
   }
 
   function setupAiValues() {
@@ -4737,7 +5387,7 @@ return response.toString();`;
       aiApiUrl: preset.editableUrl === false ? preset.apiUrl : (dom.setupAiUrl.value.trim() || preset.apiUrl || ''),
       aiModel: dom.setupAiModel.value.trim() || preset.model || '',
       aiWorkspaceId: provider === 'anthropic' ? $('setupAiWorkspace').value.trim() : '',
-      aiApiKey: typed || state.aiKeys[provider] || ''
+      aiApiKey: typed
     };
   }
 
@@ -4746,8 +5396,8 @@ return response.toString();`;
     const preset = aiPreset(provider);
     const claude = dom.setupAiClaudeKey.value.trim();
     const cursor = dom.setupAiCursorKey.value.trim();
-    if (claude) state.aiKeys.anthropic = claude;
-    if (cursor) state.aiKeys.cursor = cursor;
+    if (claude) state.pendingKeys.anthropic = claude;
+    if (cursor) state.pendingKeys.cursor = cursor;
     if (provider) {
       state.ai.provider = provider;
       state.ai.label = dom.setupAiLabel.value.trim() || preset.label || '';
@@ -4758,10 +5408,18 @@ return response.toString();`;
     refreshAiFromKeys();
   }
 
-  function rememberProviderKey(provider, key, clear) {
+  // Hands a typed key to livingdocs_save_api_key (admins only) or clears the stored one. Nothing is kept in the widget.
+  async function storeProviderKey(provider, key, clear) {
     if (provider !== 'anthropic' && provider !== 'cursor') return;
-    if (key) state.aiKeys[provider] = key;
-    else if (clear) state.aiKeys[provider] = '';
+    if (!key && !clear) return;
+    const res = key
+      ? await window.LivingDocsAI.saveApiKey(provider, key, getZohoApiDomain())
+      : await window.LivingDocsAI.clearApiKey(provider, getZohoApiDomain());
+    applyKeyState(res.keys);
+    if (key && state.legacyKeys[provider]) {
+      const legacyProviders = ['anthropic', 'cursor'].filter(p => state.legacyKeys[p]);
+      state.clearLegacyKeys = legacyProviders.every(p => keyInfo(p).set);
+    }
   }
 
   // providerChanged: fill in the defaults of the newly chosen provider.
@@ -4785,12 +5443,9 @@ return response.toString();`;
     if (urlField) urlField.hidden = preset.editableUrl === false;
     dom.settingsAiUrlHint.textContent = AI_URL_HINTS[provider] || '';
     $('settingsAiWorkspaceField').hidden = provider !== 'anthropic';
-    const saved = state.aiKeys[provider] || '';
-    const keySaved = Boolean(saved) && !state.clearAiKey;
-    dom.settingsAiKey.placeholder = keySaved ? `Saved, ends in …${saved.slice(-4)}. Leave blank to keep it.` : 'Paste the API key';
-    dom.settingsAiKeyHint.textContent = keySaved
-      ? 'Saved on the Living_Docs_Settings record. Leave blank to keep it.'
-      : `${AI_KEY_HINTS[provider] || ''} Saved on the Living_Docs_Settings record.`.trim();
+    const keySaved = keyInfo(provider).set && !state.clearAiKey;
+    dom.settingsAiKey.placeholder = keySaved ? `${keyPlaceholder(provider, '')}. Leave blank to keep it.` : 'Paste the API key';
+    dom.settingsAiKeyHint.textContent = keySaved ? keySavedText(provider) : `${AI_KEY_HINTS[provider] || ''} ${KEY_STORE_NOTE}`.trim();
     dom.btnClearAiKey.hidden = !keySaved;
   }
 
@@ -4809,8 +5464,7 @@ return response.toString();`;
       label: values.aiLabel || preset.label || '',
       apiUrl: values.aiApiUrl || preset.apiUrl || '',
       model: values.aiModel || preset.model || '',
-      workspaceId: provider === 'anthropic' ? String(values.aiWorkspaceId ?? state.ai.workspaceId ?? '').trim() : '',
-      apiKey: String(values.aiApiKey || state.aiKeys[provider] || '').trim()
+      workspaceId: provider === 'anthropic' ? String(values.aiWorkspaceId ?? state.ai.workspaceId ?? '').trim() : ''
     };
   }
 
@@ -4828,9 +5482,20 @@ return response.toString();`;
     const btn = button || dom.btnTestAi;
     const models = listEl || dom.settingsAiModel;
     if (!formValues.aiProvider) { showAiTestResult(false, 'Choose a provider first.', result); return; }
-    if (!formValues.aiApiKey) { showAiTestResult(false, 'Enter the API key.', result); return; }
+    if (!formValues.aiApiKey && !keyInfo(formValues.aiProvider).set) { showAiTestResult(false, 'Enter the API key.', result); return; }
     setBusy(btn, true);
     try {
+      // The gateway tests the stored key, so a newly typed key is stored first.
+      if (formValues.aiApiKey) {
+        await storeProviderKey(formValues.aiProvider, formValues.aiApiKey, false);
+        if (resultEl === dom.setupAiTestResult) {
+          (formValues.aiProvider === 'cursor' ? dom.setupAiCursorKey : dom.setupAiClaudeKey).value = '';
+          renderSetupAiFields(false);
+        } else if (!resultEl) {
+          dom.settingsAiKey.value = '';
+          renderAiFields(false);
+        }
+      }
       const resp = await testProvider(formValues);
       const account = resp.account ? ` as ${resp.account}` : '';
       showAiTestResult(true, `Connected to ${resp.label} (${resp.model})${account} in ${(resp.ms / 1000).toFixed(1)}s.`, result);
@@ -4861,10 +5526,10 @@ return response.toString();`;
         showToast(`Set up Claude or Cursor to ${action}.`, 'warning');
         return false;
       }
-      values = next;
+      values = { ...next, aiApiKey: '' };
       try {
+        await storeProviderKey(next.aiProvider, next.aiApiKey, false);
         const test = await testProvider(next);
-        rememberProviderKey(next.aiProvider, next.aiApiKey, false);
         state.ai.provider = next.aiProvider;
         state.ai.label = next.aiLabel || aiPreset(next.aiProvider).label || '';
         state.ai.apiUrl = next.aiApiUrl || aiPreset(next.aiProvider).apiUrl || '';
@@ -4873,7 +5538,7 @@ return response.toString();`;
         refreshAiFromKeys();
         const saved = await saveSettingsRecord();
         if (!saved.ok) throw new Error(saved.message || 'Living_Docs_Settings could not be saved.');
-        if (!aiIsConfigured()) throw new Error('The API key was not saved on Living_Docs_Settings.');
+        if (!aiIsConfigured()) throw new Error('No API key is stored for this provider yet.');
         showToast(`${test.label || aiName()} is connected (${test.model}).`);
         return true;
       } catch (err) {
@@ -4889,11 +5554,11 @@ return response.toString();`;
       title: 'Set up AI first',
       confirmLabel: 'Test and save',
       html: `
-        <p>You need an AI provider to ${escapeHtml(action)}. Choose Claude or Cursor and paste an API key. The key is tested, then saved on the Living_Docs_Settings record.</p>
+        <p>You need an AI provider to ${escapeHtml(action)}. Choose Claude or Cursor and paste an API key. ${escapeHtml(KEY_STORE_NOTE)}</p>
         ${error ? `<div class="notice error">${escapeHtml(error)}</div>` : ''}
         <label class="field"><span>Provider</span><select id="aiSetupProvider">${providerOptions}</select></label>
-        <label class="field"><span>API URL</span><input type="url" id="aiSetupUrl" spellcheck="false" value="${escapeHtml(values.aiApiUrl || '')}" /></label>
-        <label class="field"><span>API key <span class="req">required</span></span><input type="password" id="aiSetupKey" autocomplete="off" data-required value="${escapeHtml(values.aiApiKey || '')}" /></label>
+        <label class="field" hidden><span>API URL</span><input type="url" id="aiSetupUrl" spellcheck="false" readonly value="${escapeHtml(values.aiApiUrl || '')}" /></label>
+        <label class="field"><span>API key <span class="req">required</span></span><input type="password" id="aiSetupKey" autocomplete="off" data-required value="" /></label>
         <label class="field" id="aiSetupWorkspaceField"><span>Workspace ID <span class="muted">optional</span></span><input type="text" id="aiSetupWorkspace" spellcheck="false" autocomplete="off" placeholder="wrkspc_…" value="${escapeHtml(values.aiWorkspaceId ?? state.ai.workspaceId ?? '')}" /><small>Only needed when the key is not tied to a workspace.</small></label>
         <label class="field"><span>Model</span><select id="aiSetupModel"></select></label>
         <p class="muted small" id="aiSetupHint"></p>
@@ -4949,7 +5614,7 @@ return response.toString();`;
 
     setBusy(dom.btnSaveSettings, true);
     try {
-      rememberProviderKey(ai.aiProvider, dom.settingsAiKey.value.trim(), state.clearAiKey);
+      await storeProviderKey(ai.aiProvider, dom.settingsAiKey.value.trim(), state.clearAiKey);
       if (ai.aiProvider) {
         state.ai.provider = ai.aiProvider;
         state.ai.label = ai.aiLabel;

@@ -5054,7 +5054,7 @@ return response.toString();`;
         <span class="muted small">${escapeHtml(r.type)} · ${escapeHtml(r.action === 'Updated' ? `updated to v${r.version}` : `created v${r.version}`)}</span>
         ${r.saved ? `<span class="pill ${r.action === 'Updated' ? 'pill-blue' : 'pill-green'}">${escapeHtml(r.action)}</span>` : `<span class="pill pill-red" title="${escapeHtml(r.message)}">Not saved</span>`}
         ${r.saved ? (r.attached ? '<span class="pill pill-green">PDF attached</span>' : `<span class="pill pill-red" title="${escapeHtml(r.message)}">PDF not attached</span>`) : ''}
-        ${r.id ? `<button type="button" class="link-btn" data-open-record="${escapeHtml(r.id)}">Open</button>` : ''}
+        ${r.id && r.saved ? docRecordLink({ id: r.id, Doc_Version: r.version }) : ''}
       </li>`).join('');
     return `
       <div class="doc-log">
@@ -5118,8 +5118,8 @@ return response.toString();`;
         if (btn.dataset.saveAction === 'retry') saveDoc(doc);
       });
     });
-    dom.saveCard.querySelectorAll('[data-open-record]').forEach((btn) => {
-      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openRecord));
+    dom.saveCard.querySelectorAll('[data-open-doc]').forEach((btn) => {
+      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openDoc));
     });
   }
 
@@ -5484,8 +5484,8 @@ return response.toString();`;
         }
       });
     });
-    dom.saveCard.querySelectorAll('[data-open-record]').forEach((btn) => {
-      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openRecord));
+    dom.saveCard.querySelectorAll('[data-open-doc]').forEach((btn) => {
+      btn.addEventListener('click', () => openCrmRecord(entity, btn.dataset.openDoc));
     });
   }
 

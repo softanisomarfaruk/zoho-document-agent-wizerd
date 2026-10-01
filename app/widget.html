@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Living Docs for Zoho CRM</title>
+  <title>Documentation Agent for Zoho CRM</title>
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -17,7 +17,7 @@
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
       </div>
       <div>
-        <div class="brand-name">Living Docs</div>
+        <div class="brand-name">Automation Doc</div>
         <div class="brand-sub">Workflow documentation for Zoho CRM</div>
       </div>
     </div>
@@ -34,11 +34,21 @@
   </header>
 
   <!-- Shown only while the first check runs. The checklist below appears when something is missing. -->
-  <section class="screen active" id="screenBoot">
-    <div class="setup-card">
-      <div class="setup-head">
-        <h1>Loading Living Docs</h1>
-        <p>Opening your workflows.</p>
+  <section class="screen active" id="screenBoot" aria-busy="true" aria-label="Loading">
+    <div class="skel-app">
+      <div class="skel-stepper">
+        <span class="skel skel-pill"></span><span class="skel skel-pill"></span><span class="skel skel-pill"></span><span class="skel skel-pill"></span><span class="skel skel-pill"></span>
+      </div>
+      <div class="skel skel-title"></div>
+      <div class="skel-kpis">
+        <div class="skel-card"><span class="skel skel-line short"></span><span class="skel skel-num"></span><span class="skel skel-line"></span></div>
+        <div class="skel-card"><span class="skel skel-line short"></span><span class="skel skel-num"></span><span class="skel skel-line"></span></div>
+        <div class="skel-card"><span class="skel skel-line short"></span><span class="skel skel-num"></span><span class="skel skel-line"></span></div>
+        <div class="skel-card"><span class="skel skel-line short"></span><span class="skel skel-num"></span><span class="skel skel-line"></span></div>
+      </div>
+      <div class="skel-card skel-table">
+        <span class="skel skel-line head"></span>
+        <span class="skel skel-row"></span><span class="skel skel-row"></span><span class="skel skel-row"></span><span class="skel skel-row"></span><span class="skel skel-row"></span>
       </div>
     </div>
   </section>
@@ -188,7 +198,7 @@
       <li data-step="2"><span class="num">2</span><span class="label">Select workflows</span></li>
       <li data-step="3"><span class="num">3</span><span class="label">Review criteria &amp; code</span></li>
       <li data-step="4"><span class="num">4</span><span class="label">Document</span></li>
-      <li data-step="5"><span class="num">5</span><span class="label">Save to CRM</span></li>
+      <li data-step="5"><span class="num">5</span><span class="label">View saved Records</span></li>
     </ol>
 
     <!-- STEP 1: OVERVIEW -->
@@ -241,7 +251,7 @@
           <span class="muted small">Click a module to see its rules</span>
         </div>
         <div class="table-wrap">
-          <table class="table">
+          <table class="table module-table">
             <thead><tr><th>Module</th><th class="num">Rules</th><th class="num">Active</th><th class="num">Calling a function</th><th>Last documented</th><th></th></tr></thead>
             <tbody id="moduleTableBody"></tbody>
           </table>
@@ -289,6 +299,7 @@
                 <th>Trigger</th>
                 <th>Actions</th>
                 <th>Status</th>
+                <th>Documentation</th>
                 <th></th>
               </tr>
             </thead>
@@ -448,6 +459,8 @@
     </div>
     <p class="muted small">Only masked rules, criteria and code are sent. Record, workflow and org IDs, tokens and credentials are replaced with placeholders in your browser, and the prompt is checked once more just before it is sent.</p>
 
+    <!-- Hidden for now; the values still apply. -->
+    <div hidden>
     <div class="section-label">Documentation</div>
     <label class="field">
       <span>Audience</span>
@@ -465,6 +478,7 @@
       </select>
       <small>Response time mostly depends on how long the document is. For Claude, Haiku is the fastest model.</small>
     </label>
+    </div>
     <p class="muted small" id="settingsRecordNote"></p>
   </div>
   <div class="drawer-foot">

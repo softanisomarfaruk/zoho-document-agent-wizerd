@@ -1660,6 +1660,13 @@
 
     dom.btnToSelect.addEventListener('click', () => goToStep(2));
     dom.moduleTableBody.addEventListener('click', (e) => {
+      // The module master document link opens the record instead of filtering by the module.
+      const doc = e.target.closest('[data-open-doc]');
+      if (doc) {
+        e.preventDefault();
+        openCrmRecord(logModuleApi('documents'), doc.dataset.openDoc);
+        return;
+      }
       const row = e.target.closest('tr[data-module]');
       if (!row) return;
       dom.wfModuleFilter.value = row.dataset.module;
@@ -1685,6 +1692,13 @@
       selectionChanged();
     });
     dom.wfTableBody.addEventListener('click', (e) => {
+      // A rule's own document link opens the record; it does not select or unselect the row.
+      const doc = e.target.closest('[data-open-doc]');
+      if (doc) {
+        e.preventDefault();
+        openCrmRecord(logModuleApi('documents'), doc.dataset.openDoc);
+        return;
+      }
       const show = e.target.closest('[data-show-rule]');
       if (show) {
         e.preventDefault();
@@ -1736,6 +1750,13 @@
     dom.btnViewDocument.addEventListener('click', () => openRuleView('document'));
     dom.btnCloseRuleDoc.addEventListener('click', closeRuleDoc);
     dom.ruleDocBackdrop.addEventListener('click', (e) => { if (e.target === dom.ruleDocBackdrop) closeRuleDoc(); });
+    dom.ruleDocBody.addEventListener('click', (e) => {
+      const zoom = e.target.closest('[data-fc-zoom]');
+      if (!zoom) return;
+      const id = zoom.dataset.fcZoom;
+      const wf = state.reviewWorkflows.find(w => String(w.id) === id) || state.allWorkflowsList.find(w => String(w.id) === id);
+      if (wf) openFlowchartViewer(wf);
+    });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && dom.ruleDocBackdrop && !dom.ruleDocBackdrop.hidden) closeRuleDoc();
     });
@@ -2163,6 +2184,11 @@
       });
     });
     state.docLog = { ok: !error, error, byItem, byFunction, byModule, records: docs };
+    // The tables show the latest version and the link to it, so they follow every reload of the log.
+    if (state.allWorkflowsList.length) {
+      renderModuleTable();
+      renderWorkflowTable();
+    }
   }
 
   // Related_Items on a workflow record lists its functions, one per line: "name [key] sha256:hash".
@@ -2400,13 +2426,16 @@
     dom.moduleTableBody.innerHTML = rows.length ? rows.map((g) => {
       const label = moduleLabel(g.module);
       const doc = logReady ? state.docLog.byModule[g.module] : null;
+      // One line per cell so every row has the same height; the longer text is in the tooltip.
+      const master = logReady ? state.docLog.byItem[moduleDocItemId(g.module)] : null;
       const docCell = !state.docLog ? '<span class="muted small">Loading…</span>'
         : !logReady ? '<span class="muted small">Log not available</span>'
-          : doc ? `<div class="cell-title">${escapeHtml(formatDate(doc.last.Generated_At || doc.last.Created_Time))}</div><div class="cell-sub">${escapeHtml(doc.last.Item_Name || '')} · v${escapeHtml(doc.last.Doc_Version || 1)} · ${plural(doc.count, 'record')}</div>`
+          : master && master.id ? `<span class="cell-line">${docRecordLink(master)}<span class="cell-api">${escapeHtml(formatDate(master.Generated_At || master.Created_Time))}</span></span>`
+          : doc ? `<span class="cell-line" title="${escapeHtml(`${doc.last.Item_Name || ''} · v${doc.last.Doc_Version || 1}`)}"><span class="cell-title">${escapeHtml(formatDate(doc.last.Generated_At || doc.last.Created_Time))}</span><span class="cell-api">v${escapeHtml(doc.last.Doc_Version || 1)} · ${plural(doc.count, 'record')}</span></span>`
             : '<span class="muted small">Not documented yet</span>';
       return `
       <tr class="clickable" data-module="${escapeHtml(g.module)}">
-        <td><div class="cell-title">${escapeHtml(label)}</div>${label !== g.module ? `<div class="cell-sub">${escapeHtml(g.module)}</div>` : ''}</td>
+        <td><span class="cell-line" title="${escapeHtml(g.module)}"><span class="cell-title">${escapeHtml(label)}</span>${label !== g.module ? `<span class="cell-api">${escapeHtml(g.module)}</span>` : ''}</span></td>
         <td class="num">${g.rules}</td>
         <td class="num">${g.active}</td>
         <td class="num">${g.withFn}</td>
@@ -2453,7 +2482,7 @@
       renderModuleTable();
       populateModuleFilter();
       renderWorkflowTable();
-      dom.scanStatus.textContent = `Updated ${new Date().toLocaleTimeString()} through "${docsConn}".`;
+      dom.scanStatus.textContent = '';
       if (state.maxStep < 2) limitSteps(2);
     } else {
       setKpisLoading(false);
@@ -2513,11 +2542,37 @@
             ${wf.fnCount ? `<span class="pill pill-blue">${wf.fnCount} function${wf.fnCount === 1 ? '' : 's'}</span>` : ''}
           </td>
           <td>${wf.status === 'active' ? '<span class="pill pill-green">Active</span>' : '<span class="pill pill-gray">Inactive</span>'}</td>
+          <td>${workflowDocCell(wf)}</td>
           <td><button type="button" class="btn btn-ghost btn-sm" data-show-rule="${escapeHtml(wf.id)}">Show workflow rule</button></td>
         </tr>`;
-    }).join('') : '<tr class="empty-row"><td colspan="7">No workflow rules match these filters.</td></tr>';
+    }).join('') : '<tr class="empty-row"><td colspan="8">No workflow rules match these filters.</td></tr>';
     updateSelectionUI(rows);
     renderModuleDocButton();
+  }
+
+  // A rule's own document gets the version and a link to its record. A rule covered only by its module's
+  // master document shows "Documented"; that record's link is on the module row in the overview.
+  function workflowDocCell(wf) {
+    if (!state.docLog) return '<span class="muted small">Checking…</span>';
+    if (!state.docLog.ok) return '<span class="muted small">Not available</span>';
+    const own = state.docLog.byItem[String(wf.id)];
+    if (own && own.id) return docRecordLink(own);
+    const master = state.docLog.byItem[moduleDocItemId(wf.module)];
+    if (master) {
+      const when = formatDate(master.Generated_At || master.Created_Time);
+      return `<span class="pill pill-green" title="${escapeHtml(`In the ${moduleLabel(wf.module)} master document, v${master.Doc_Version || 1}${when ? ` · ${when}` : ''}`)}">Documented</span>`;
+    }
+    return '<span class="muted small">Not documented</span>';
+  }
+
+  // Version badge plus "Open in CRM"; opens the Living_Docs_Documents record.
+  function docRecordLink(rec) {
+    const when = formatDate(rec.Generated_At || rec.Created_Time);
+    return `<button type="button" class="doc-link" data-open-doc="${escapeHtml(rec.id)}" title="Open the documentation record in Zoho CRM${when ? ` (${escapeHtml(when)})` : ''}">
+        <span class="pill pill-green">v${escapeHtml(rec.Doc_Version || 1)}</span>
+        <span>Open in CRM</span>
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </button>`;
   }
 
   function renderModuleDocButton() {
@@ -2591,7 +2646,7 @@
     dom.promptUser.value = '';
     updatePromptStats();
     dom.reviewStatus.textContent = `Loading ${selected.length} rule${selected.length === 1 ? '' : 's'} and downloading function code…`;
-    dom.reviewBody.innerHTML = loadingBlock('Downloading function code with GET /crm/v8/settings/functions/{id}/code');
+    dom.reviewBody.innerHTML = loadingBlock('Processing…');
     try {
       const loaded = await loadWorkflowsWithFunctionCode(selected);
       await loadFieldsForModules(loaded).catch(() => null);
@@ -2873,8 +2928,11 @@
         ${wf.description ? `<p class="static-desc">${escapeHtml(wf.description)}</p>` : ''}
         <div class="rd-grid">
           <section class="rd-panel">
-            <div class="rd-panel-head"><h4>Flow</h4><span>Checked from top to bottom</span></div>
-            ${renderFlowchart(wf)}
+            <div class="rd-panel-head"><h4>Flow</h4><span>Click the chart to enlarge</span></div>
+            <button type="button" class="fc-zoom" data-fc-zoom="${escapeHtml(wf.id)}" title="Click to enlarge">
+              ${renderFlowchart(wf)}
+              <span class="fc-zoom-hint" aria-hidden="true">⤢ Enlarge</span>
+            </button>
           </section>
           <section class="rd-panel">
             <div class="rd-panel-head"><h4>Criteria and actions</h4><span>${plural(branches.length, 'condition')}</span></div>
@@ -2883,6 +2941,100 @@
           </section>
         </div>
       </article>`;
+  }
+
+  // ---------- Flowchart viewer ----------
+  // Full-screen view of one rule's flowchart with zoom (buttons, Ctrl + mouse wheel, + / - keys) and scroll to pan.
+  const FC_ZOOM_MIN = 0.4;
+  const FC_ZOOM_MAX = 4;
+
+  function openFlowchartViewer(wf) {
+    closeFlowchartViewer();
+    const box = document.createElement('div');
+    box.className = 'fc-viewer';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-label', `Flowchart of ${wf.name || 'the workflow rule'}`);
+    box.innerHTML = `
+      <div class="fc-viewer-bar">
+        <strong>${escapeHtml(wf.name || 'Workflow rule')}</strong>
+        <div class="fc-viewer-tools">
+          <span class="fc-viewer-help">Scroll to zoom · drag to move</span>
+          <button type="button" class="btn btn-ghost btn-sm" data-fc-act="out" title="Zoom out (-)">−</button>
+          <span class="fc-viewer-level">100%</span>
+          <button type="button" class="btn btn-ghost btn-sm" data-fc-act="in" title="Zoom in (+)">+</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-fc-act="fit" title="Fit to screen">Fit</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-fc-act="close" title="Close (Esc)">Close</button>
+        </div>
+      </div>
+      <div class="fc-viewer-stage">${renderFlowchart(wf)}</div>`;
+    document.body.appendChild(box);
+    const stage = box.querySelector('.fc-viewer-stage');
+    const svg = stage.querySelector('svg');
+    const level = box.querySelector('.fc-viewer-level');
+    const baseW = Number(svg.getAttribute('width')) || FC.width;
+    const baseH = Number(svg.getAttribute('height')) || FC.width;
+    let zoom = 1;
+    const apply = (next) => {
+      zoom = Math.min(FC_ZOOM_MAX, Math.max(FC_ZOOM_MIN, next));
+      svg.style.width = `${Math.round(baseW * zoom)}px`;
+      svg.style.height = `${Math.round(baseH * zoom)}px`;
+      level.textContent = `${Math.round(zoom * 100)}%`;
+    };
+    const fit = () => apply(Math.min((stage.clientWidth - 40) / baseW, (stage.clientHeight - 40) / baseH, 2));
+    fit();
+    box.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-fc-act]');
+      if (!act) { if (e.target === box) closeFlowchartViewer(); return; }
+      const a = act.dataset.fcAct;
+      if (a === 'in') apply(zoom * 1.25);
+      else if (a === 'out') apply(zoom / 1.25);
+      else if (a === 'fit') fit();
+      else closeFlowchartViewer();
+    });
+    // Mouse wheel zooms in and out around the pointer: the point under the cursor stays where it is.
+    stage.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const before = svg.getBoundingClientRect();
+      const px = (e.clientX - before.left) / before.width;
+      const py = (e.clientY - before.top) / before.height;
+      const prev = zoom;
+      apply(zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+      if (zoom === prev) return;
+      const after = svg.getBoundingClientRect();
+      stage.scrollLeft += after.left + px * after.width - e.clientX;
+      stage.scrollTop += after.top + py * after.height - e.clientY;
+    }, { passive: false });
+    // Drag to move around, since the wheel now zooms.
+    let drag = null;
+    stage.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      drag = { x: e.clientX, y: e.clientY, left: stage.scrollLeft, top: stage.scrollTop };
+      try { stage.setPointerCapture(e.pointerId); } catch (_) { /* drag still works without capture */ }
+      stage.classList.add('dragging');
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      stage.scrollLeft = drag.left - (e.clientX - drag.x);
+      stage.scrollTop = drag.top - (e.clientY - drag.y);
+    });
+    const endDrag = () => { drag = null; stage.classList.remove('dragging'); };
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+    box._onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeFlowchartViewer(); }
+      else if (e.key === '+' || e.key === '=') apply(zoom * 1.25);
+      else if (e.key === '-') apply(zoom / 1.25);
+    };
+    document.addEventListener('keydown', box._onKey, true);
+    box.querySelector('[data-fc-act="close"]').focus();
+  }
+
+  function closeFlowchartViewer() {
+    const box = document.querySelector('.fc-viewer');
+    if (!box) return;
+    document.removeEventListener('keydown', box._onKey, true);
+    box.remove();
   }
 
   function closeRuleDoc() {
@@ -4277,6 +4429,22 @@ return response.toString();`;
 
   function bindFunctionReviewEvents() {
     dom.reviewBody.addEventListener('click', (e) => {
+      const more = e.target.closest('.review-more');
+      if (!more) return;
+      const card = more.closest('.review-crit');
+      const body = card.querySelector('.review-crit-body');
+      const open = !card.classList.contains('expanded');
+      card.classList.toggle('expanded', open);
+      if (open) {
+        body.style.maxHeight = '';
+        more.textContent = 'See less';
+      } else {
+        more.textContent = 'See more';
+        fitReviewCards();
+        card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
+    dom.reviewBody.addEventListener('click', (e) => {
       const card = e.target.closest('.fn-card[data-fn]');
       if (!card) return;
       const fn = findReviewFunction(card.dataset.fn);
@@ -4393,9 +4561,10 @@ return response.toString();`;
           ${wf.description ? `<div class="card"><div class="card-head"><h3>Description</h3></div><p class="condition">${escapeHtml(wf.description)}</p></div>` : ''}
         </div>
         <div class="review-main">
-          <div class="card">
+          <div class="card review-crit">
             <div class="card-head"><h3>Criteria and actions</h3></div>
-            ${renderConditions(wf)}
+            <div class="review-crit-body">${renderConditions(wf)}</div>
+            <button type="button" class="review-more" hidden>See more</button>
           </div>
         </div>
       </div>
@@ -4403,8 +4572,41 @@ return response.toString();`;
         <div class="card-head"><h3>Function code</h3><span class="muted small">Secrets are masked and the code is checked before anything is sent to the AI</span></div>
         ${renderFunctions(wf)}
       </div>`;
+    fitReviewCards();
     showPromptFor(wf);
   }
+
+  // The rule card and the criteria card end on the same line. A criteria card taller than the rule card is
+  // cut to its height and gets "See more"; on narrow screens the cards stack and nothing is cut.
+  function fitReviewCards() {
+    const side = dom.reviewBody.querySelector('.review-side');
+    const card = dom.reviewBody.querySelector('.review-crit');
+    if (!side || !card) return;
+    const body = card.querySelector('.review-crit-body');
+    const more = card.querySelector('.review-more');
+    if (card.classList.contains('expanded')) return;
+    body.style.maxHeight = '';
+    card.classList.remove('clamped');
+    more.hidden = true;
+    const sideBySide = Math.abs(side.getBoundingClientRect().top - card.getBoundingClientRect().top) < 4;
+    if (!sideBySide) return;
+    // The grid stretches the rule column to the criteria card, so its own height is read without stretching.
+    side.style.alignSelf = 'start';
+    const sideHeight = side.offsetHeight;
+    side.style.alignSelf = '';
+    const room = sideHeight - (card.offsetHeight - body.offsetHeight);
+    // Only cut when it saves real space, so a card a few pixels too tall is shown whole.
+    if (body.scrollHeight <= room + 40) return;
+    card.classList.add('clamped');
+    more.hidden = false;
+    body.style.maxHeight = `${Math.max(120, room - more.offsetHeight)}px`;
+  }
+
+  let reviewFitTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(reviewFitTimer);
+    reviewFitTimer = setTimeout(fitReviewCards, 150);
+  });
 
   function activeReviewWorkflow() {
     const list = state.reviewWorkflows;

@@ -1,105 +1,126 @@
 # Living Docs for Zoho CRM
 
-- Zoho CRM widget that reads workflow rules and custom functions, writes documentation with AI, and saves a PDF on a CRM record.
+Zoho CRM widget that reads workflow rules and custom functions, writes documentation with AI, and saves a PDF on a `Living_Docs_Documents` record.
+
 - Runs inside Zoho CRM. Live CRM data is only available there.
 - AI providers are Claude and Cursor. There is no local AI fallback.
 - Secrets, record IDs, org IDs, tokens, and credentials are masked in the browser before any prompt is sent. The gateway function masks credentials again inside CRM.
 - AI API keys never reach the browser. They are stored AES-encrypted in a CRM Org Variable, and prompts go to the provider through a Deluge function (see **AI key security**).
 
-## Features
+## Full flow
 
-### Setup
+Open the widget from inside Zoho CRM (a web tab or a record). The page shows a loading skeleton, then runs the setup check. CRM calls go through the connection `docsagent_connection`. There is no separate WorkDrive upload.
 
-- Checks that the widget is open inside Zoho CRM, that settings exist, that the custom modules are installed, and that an AI provider is configured.
-- Shows the CRM connection name `docsagent_connection` and the scopes to add, with copy buttons.
-- Installs the custom modules if they are missing:
-  - `Living_Docs_Settings`
-  - `Living_Docs_Snapshots`
-  - `Living_Docs_Documents`
-  - `Living_Docs_Changes`
-- Settings cover the CRM connection, AI provider, model, and the audience (CRM administrator, developer, or business owner). `Living_Docs_Settings` holds no API keys.
-- Submit also installs the Org Variable `livingdocs_llm_key` and the two AI functions, then stores the typed API key encrypted. Plain-text keys left on an older settings record are moved and the old fields are emptied.
+### 0. Setup check
 
-### Overview
+Five checks run on every launch:
 
-- Scans modules, workflow rules, and custom functions through the CRM connection.
-- Shows counts for modules, workflow rules, custom functions, and active rules.
-- Lists rules by module, with active count, how many call a function, last documented version, and how many changes are logged.
-- Reload scans CRM again.
+1. **Zoho CRM connection** — `GET /crm/v8/settings/modules` with `docsagent_connection`.
+2. **Saved settings** — a `Living_Docs_Settings` record (connection name, provider, model, API URL, Claude workspace ID, audience). This record holds no API keys.
+3. **Documentation modules** — `Living_Docs_Settings` and `Living_Docs_Documents`.
+4. **AI functions and encrypted key store** — `livingdocs_save_api_key`, `livingdocs_llm_gateway`, and the Org Variable `livingdocs_llm_key`.
+5. **AI provider** — Claude or Cursor, with a key already stored encrypted in CRM.
 
-### Select workflows
+If every check passes, the checklist is skipped and the widget opens **Overview** and scans CRM. The checklist is shown only when something is missing, or when **Run setup check** is used from Settings.
 
-- Pick one rule or several. Selected rules go into one document.
+When something is missing, setup has two tabs:
+
+1. **Connection** — the link name `docsagent_connection` and the scopes to add, with copy buttons.
+2. **AI provider** — Claude or Cursor, display name, model, API URL, API key, and an optional Claude workspace ID. **Test connection** checks the key. Leave the key blank to keep the one already stored.
+
+**Next** moves from Connection to AI provider. **Submit** then:
+
+1. Creates the two custom modules if they are missing.
+2. Installs the Org Variable and the two AI functions. If Zoho refuses, the installation log shows the scripts to paste.
+3. Stores the typed API key encrypted. Plain-text keys left on an older settings record are moved and those fields are emptied.
+4. Creates or updates the `Living_Docs_Settings` record.
+5. Runs the check again. **Continue** enters the five steps.
+
+### 1. Overview
+
+Scans modules, workflow rules, and custom functions.
+
+- Four counts: modules, workflow rules, custom functions, active rules. Each count shows the change against the last scan on this browser.
+- A table of rules by module: rule count, active count, how many call a function, and the last documented version (with **Open in CRM** when a master document or a workflow document exists).
+- Click a module row to open **Select workflows** filtered to that module.
+- **Rescan** in the top bar loads CRM again.
+- **Select workflows** goes to step 2.
+
+### 2. Select workflows
+
+Pick **up to 3** rules. Each selected rule becomes its own document. They are written in parallel, not merged into one file.
+
 - Search by name, criteria, or action.
 - Filter by module, status (active or inactive), and “only rules that call a function”.
-- Select all visible rows, or clear the selection.
+- Select all visible rows (still capped at 3), or clear the selection.
+- Each row shows whether that rule is already documented, the version, and a link to the CRM record.
+- **Review selected** goes to step 3. Changing the selection after a review drops back to this step.
 
-### Review
+**Module document** (separate path): filter to one module. **Generate &lt;module&gt; document** appears and documents every rule of that module. See **Module document** below. It does not use the 3-rule selection.
 
-- Loads the full rule and the function source for each selected workflow.
+### 3. Review criteria and code
+
+Loads the full rule and the function source for each selected workflow, then builds the prompt.
+
+- One tab per selected rule.
 - **Details** opens the rule:
   - Summary of module, trigger, status, conditions, actions, and functions.
   - Flowchart from top to bottom: Start, each condition, Yes and No, actions, then Done or the next condition.
   - Criteria text and the actions on each branch (function, field update, email, or other).
 - Each function has four tabs:
   - **Checks** — Deluge lint with errors, warnings, and info on the code.
-  - **Sent to AI** — the masked code that will be sent. Select text and choose **Mask as secret** to hide more.
-  - **Improve and apply** — asks the AI for a better version, then **Apply as main function** writes it back to the CRM function through `livingdocs_update_function`.
+  - **Sent to AI** — the masked code that will be sent. Select text and choose **Mask as secret** to hide more. Record IDs, org IDs, tokens, and credentials stay masked.
+  - **Improve and apply** — asks the AI for a better version, shows it next to the current code, then **Apply as main function** writes it back through `livingdocs_update_function`.
   - **Versions** — earlier copies of the function kept by the widget. Zoho also keeps its own Deluge revision history.
-- Shows whether the function changed since the last documented version.
-- The prompt is built from the rule, criteria, and masked code. You can edit it, reset it, or copy it before generating.
+- If the function source changed since the last saved document, the review says so.
+- **Prompt** is collapsed under the review. It has two boxes: instructions, and the rule, criteria, and masked code. Edit either box, **Reset prompt**, or **Copy prompt**.
+- **Generate documentation** goes to step 4. The prompt for every selected rule must be non-empty, and an AI provider must be configured.
 
-### Document
+The prompt uses the saved audience (CRM administrator, developer, or business owner; default administrator) and document detail (quick or detailed; default quick). Those two controls are not shown in Settings right now; the saved values still apply.
 
-- AI writes the documentation in markdown from the prompt.
-- On screen you can switch between the written document and the rule details.
-- Copy the text, download a `.md` file, or download a PDF.
-- The PDF uses the same layout as the on-screen document: cover (title, module, date, author) and a page footer.
+### 4. Document
 
-### Save to CRM
+Writes one markdown document per selected rule, up to 3 at a time. As each reply finishes, that document is turned into a PDF and saved to CRM on its own. Saving of several documents happens one after another, because the PDF renderer uses one hidden sheet.
 
-- After the AI responds, the widget saves on its own.
-- One documentation record per workflow and per function in `Living_Docs_Documents`.
-- If a record for that item already exists, it is updated. Otherwise a new record is created.
-- The PDF is attached to that record.
-- Step 5 shows Created or Updated, whether the PDF attached, and a button to open the CRM record.
-- If save fails, you can retry or download the PDF.
-- A snapshot of the markdown is also stored, and function edits are written to `Living_Docs_Changes`.
+- Tabs switch between the rules in this run.
+- **Document** shows the markdown. **Details** shows the same rule view as step 3.
+- The text fills in on screen as each piece of the reply arrives.
+- **Copy text**, **Download .md**, and **Download PDF** work per rule once that rule’s document exists.
+- A failed rule can be retried from this step.
+- The footer button follows the save:
+  - **Save to CRM** while a written document is not in CRM yet.
+  - **Saving to CRM…** while a PDF is being attached.
+  - **View saved records** when every written document saved.
+  - **Save to CRM again** when a save failed.
 
-## How it works
+### 5. View saved records
 
-- Open the widget from inside a Zoho CRM record or the CRM app.
-- The widget calls Zoho through `docsagent_connection`. It does not use a separate WorkDrive upload.
-- Setup must pass before the five steps are available.
+Shows one block per rule in the run: workflow name, file name, who generated it, and whether the CRM write succeeded.
 
-1. **Overview**
-   - Reads modules, workflow rules, and functions.
-   - Shows the counts and the module table.
+For each rule the widget writes **one** `Living_Docs_Documents` record (`Item_Type` = Workflow), named after the workflow:
 
-2. **Select workflows**
-   - You choose the rules to document.
-   - Several rules become one document.
+- The first save **creates** version 1 and attaches the PDF.
+- A later save **updates** that same record to the next version (v2, v3, …) and attaches the new PDF. Older PDFs stay on the record.
+- The record stores the masked function source (`Source_Snapshot`), a hash of the source, the related function hashes, who generated it, and when.
+- Each row shows Created or Updated, whether the PDF attached, and **Open in CRM**.
+- If a save fails, **Try again** or **Download PDF**.
+- **Document other workflows** clears the selection and returns to step 2. **Back to document** returns to step 4.
 
-3. **Review criteria and code**
-   - Loads each rule’s conditions, actions, and function code.
-   - Masks secrets and IDs.
-   - Optionally reviews Deluge, improves a function, and applies that code back to CRM.
-   - Builds the prompt you can still edit.
+### Module document
 
-4. **Document**
-   - Sends the masked prompt to Claude or Cursor.
-   - Shows the markdown.
-   - Builds the PDF in the browser from that same design.
+From step 2, with one module filtered:
 
-5. **Save to CRM**
-   - Creates or updates the documentation record.
-   - Attaches the PDF to the record.
-   - You can open the record in CRM or start again with other workflows.
+1. Every workflow rule of that module is loaded with its function code.
+2. Each rule gets its own AI call, 3 at a time. A function used by several rules is sent with its source only on the first rule; later rules refer back to that section.
+3. The written sections are combined into **one PDF**.
+4. That PDF is saved on a single `Living_Docs_Documents` record named `<Module>_Master_Document` (`Item_Id` = `module:<api name>`). Later runs update that record and attach the next version.
+5. If every rule was written, the save starts on its own. If some failed, retry those rules or save the master document without them.
+6. Step 5 shows that one master record. The footer button is **Save module document**, then **View saved record**.
 
 ## What you need in Zoho
 
-- Connection link name `docsagent_connection` with the CRM scopes listed on the setup screen, including modules, settings, workflow rules, functions, and function execute.
-- Custom modules above, created by **Install and verify** or already present.
+- Connection link name `docsagent_connection` with the scopes listed on the setup screen (also listed below).
+- Custom modules `Living_Docs_Settings` and `Living_Docs_Documents`, created by **Submit** or already present.
 - An AI provider saved in Settings, with a working API key stored through setup.
 - The Org Variable `livingdocs_llm_key` (Multi Line) and the standalone functions `livingdocs_save_api_key` and `livingdocs_llm_gateway`, each with one String argument `payload` and REST API (OAuth 2.0) turned on. Submit creates them; if Zoho refuses, setup shows the scripts to paste.
 - On `Living_Docs_Documents`, attachments must be allowed, or the PDF cannot be attached.
@@ -127,13 +148,16 @@ Widget ──FUNCTIONS.execute──► livingdocs_save_api_key   (CRM Administr
 
 ```
 ZohoCRM.modules.ALL
-ZohoCRM.settings.ALL
+ZohoCRM.settings.READ
 ZohoCRM.settings.modules.ALL
+ZohoCRM.settings.modules.READ
+ZohoCRM.settings.ALL
+ZohoCRM.org.READ
+ZohoCRM.settings.workflow_rules.ALL
 ZohoCRM.settings.workflow_rules.READ
 ZohoCRM.settings.functions.ALL
-ZohoCRM.settings.variables.ALL
-ZohoCRM.users.READ
-ZohoCRM.org.READ
 ZohoCRM.functions.execute.READ
 ZohoCRM.functions.execute.CREATE
+ZohoCRM.settings.variables.ALL
+ZohoCRM.users.READ
 ```
